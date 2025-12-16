@@ -633,7 +633,7 @@ git config --global --list | Select-String -Pattern "encoding|utf|i18n"
    # 使用文件提交
    git commit -F commit_msg.txt
    ```
-3. **使用提交模板**：项目已配置了提交模板（`.gitmessage`），使用 `git commit` 时会自动打开模板
+3. **使用提交模板**（可选）：可以配置提交模板，使用 `git commit` 时会自动打开模板
 
 ### 永久解决方案
 
