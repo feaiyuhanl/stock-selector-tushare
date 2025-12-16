@@ -86,21 +86,32 @@ class ScoringStrategy(BaseStrategy):
             if sectors:
                 try:
                     sector_kline = self.data_fetcher.get_sector_kline(sectors[0])  # 只取第一个板块
-                    if sector_kline is not None:
+                    if sector_kline is not None and not sector_kline.empty:
                         sector_kline_list.append(sector_kline)
-                except:
-                    pass  # 板块K线获取失败不影响评分
+                    elif progress_callback:
+                        progress_callback('info', f"{stock_code} {stock_name}: 板块 '{sectors[0]}' K线数据获取失败或为空")
+                except Exception as e:
+                    if progress_callback:
+                        progress_callback('info', f"{stock_code} {stock_name}: 板块K线获取异常: {str(e)[:50]}")
+            elif progress_callback:
+                progress_callback('info', f"{stock_code} {stock_name}: 无板块信息")
             
             # 6. 获取概念K线数据（实时数据，不缓存）
-            # 优化：减少概念K线获取，只取1个最重要的概念，避免过多请求
+            # 获取所有概念的K线数据，用于加权平均计算
             concept_kline_list = []
             if concepts:
-                try:
-                    concept_kline = self.data_fetcher.get_concept_kline(concepts[0])  # 只取第一个概念
-                    if concept_kline is not None:
-                        concept_kline_list.append(concept_kline)
-                except:
-                    pass  # 概念K线获取失败不影响评分
+                for concept in concepts:
+                    try:
+                        concept_kline = self.data_fetcher.get_concept_kline(concept)
+                        if concept_kline is not None and not concept_kline.empty:
+                            concept_kline_list.append(concept_kline)
+                        elif progress_callback:
+                            progress_callback('info', f"{stock_code} {stock_name}: 概念 '{concept}' K线数据获取失败或为空")
+                    except Exception as e:
+                        if progress_callback:
+                            progress_callback('info', f"{stock_code} {stock_name}: 概念 '{concept}' K线获取异常: {str(e)[:50]}")
+            elif progress_callback:
+                progress_callback('info', f"{stock_code} {stock_name}: 无概念信息（可能需要2000积分）")
             
             # 7. 计算各维度得分
             if progress_callback:
@@ -139,6 +150,12 @@ class ScoringStrategy(BaseStrategy):
                 'pe_ratio': fundamental_data.get('pe_ratio', 0),
                 'pb_ratio': fundamental_data.get('pb_ratio', 0),
                 'roe': financial_data.get('roe', 0),
+                'sectors': sectors,  # 添加板块信息，方便调试
+                'concepts': concepts,  # 添加概念信息，方便调试
+                'sector_count': len(sectors),  # 板块数量
+                'concept_count': len(concepts),  # 概念数量
+                'has_sector_kline': len(sector_kline_list) > 0,  # 是否有板块K线数据
+                'has_concept_kline': len(concept_kline_list) > 0,  # 是否有概念K线数据
             }
             
             if progress_callback:
@@ -199,20 +216,24 @@ class ScoringStrategy(BaseStrategy):
                 if sectors:
                     try:
                         sector_kline = self.data_fetcher.get_sector_kline(sectors[0])
-                        if sector_kline is not None:
+                        if sector_kline is not None and not sector_kline.empty:
                             sector_kline_list.append(sector_kline)
-                    except:
+                    except Exception as e:
+                        # 板块K线获取失败不影响评分，静默处理
                         pass
                 
                 # 6. 获取概念K线数据（实时数据，不缓存）
+                # 获取所有概念的K线数据，用于加权平均计算
                 concept_kline_list = []
                 if concepts:
-                    try:
-                        concept_kline = self.data_fetcher.get_concept_kline(concepts[0])
-                        if concept_kline is not None:
-                            concept_kline_list.append(concept_kline)
-                    except:
-                        pass
+                    for concept in concepts:
+                        try:
+                            concept_kline = self.data_fetcher.get_concept_kline(concept)
+                            if concept_kline is not None and not concept_kline.empty:
+                                concept_kline_list.append(concept_kline)
+                        except Exception as e:
+                            # 概念K线获取失败不影响评分，静默处理
+                            pass
                 
                 data = {
                     'kline_data': kline_data,
@@ -233,28 +254,28 @@ class ScoringStrategy(BaseStrategy):
         self.data_fetcher.batch_mode = True
         batch_cache_size = 10
         
+        # 中断标志（用于跨平台中断处理）
+        import threading
+        interrupt_flag = threading.Event()
+        
         # 添加信号处理，捕获中断信号（Ctrl+C）时保存缓存
         import signal
         import sys
         
         def signal_handler(signum, frame):
-            """处理中断信号，保存缓存后退出"""
-            print("\n\n[中断] 检测到程序中断，正在保存已获取的缓存数据...")
-            try:
-                saved_count = self.data_fetcher.flush_batch_cache()
-                if saved_count > 0:
-                    print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
-                print("[中断] 缓存已保存，程序退出")
-            except Exception as e:
-                print(f"[警告] 保存缓存失败: {e}")
-            finally:
-                self.data_fetcher.batch_mode = False
-                sys.exit(0)
+            """处理中断信号，设置中断标志"""
+            if not interrupt_flag.is_set():
+                interrupt_flag.set()
+                print("\n\n[中断] 检测到程序中断（Ctrl+C），正在保存已获取的缓存数据...")
         
-        # 注册信号处理器
-        signal.signal(signal.SIGINT, signal_handler)
-        if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, signal_handler)
+        # 注册信号处理器（Windows 和 Linux 都支持）
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+            if hasattr(signal, 'SIGTERM'):
+                signal.signal(signal.SIGTERM, signal_handler)
+        except (ValueError, OSError):
+            # Windows 上可能不支持某些信号，忽略错误
+            pass
         
         # 统计信息
         stats = {
@@ -277,6 +298,14 @@ class ScoringStrategy(BaseStrategy):
                 completed = 0
                 
                 for future in as_completed(futures):
+                    # 检查中断标志
+                    if interrupt_flag.is_set():
+                        print("\n[中断] 检测到中断信号，正在取消剩余任务并保存数据...")
+                        # 取消所有未完成的任务
+                        for f in futures:
+                            f.cancel()
+                        break
+                    
                     stock_code = futures[future]
                     stock_name = stock_name_map.get(stock_code, "")
                     
@@ -318,7 +347,10 @@ class ScoringStrategy(BaseStrategy):
                         if completed % 10 == 0:
                             print(f"\n进度: {completed+1}/{total} | 成功: {stats['success']} | 失败: {stats['failed']} | {error_msg}")
                     except KeyboardInterrupt:
-                        raise
+                        # 设置中断标志
+                        interrupt_flag.set()
+                        print("\n[中断] 检测到键盘中断（Ctrl+C），正在保存数据...")
+                        break
                     except Exception as e:
                         stats['failed'] += 1
                         error_msg = f"✗ {stock_code} {stock_name}: 异常 - {str(e)[:50]}"
@@ -330,6 +362,14 @@ class ScoringStrategy(BaseStrategy):
                     completed += 1
                 
                 pbar.close()
+                
+                # 如果被中断，抛出异常以便上层处理
+                if interrupt_flag.is_set():
+                    raise KeyboardInterrupt("程序被用户中断")
+        except KeyboardInterrupt:
+            # 中断时也要保存缓存
+            interrupt_flag.set()
+            raise
         finally:
             # 确保无论是否异常都会保存缓存并关闭批量模式
             try:
@@ -342,13 +382,21 @@ class ScoringStrategy(BaseStrategy):
                 # 关闭批量模式
                 self.data_fetcher.batch_mode = False
         
-        # 显示预加载统计
-        print("\n" + "=" * 60)
-        print(f"数据预加载完成！")
-        print(f"总计: {stats['total']} 只股票")
-        print(f"成功: {stats['success']} 只 ({stats['success']/stats['total']*100:.1f}%)")
-        print(f"失败: {stats['failed']} 只 ({stats['failed']/stats['total']*100:.1f}%)")
-        print("=" * 60)
+        # 显示预加载统计（只有在未中断时显示）
+        if not interrupt_flag.is_set():
+            print("\n" + "=" * 60)
+            print(f"数据预加载完成！")
+            print(f"总计: {stats['total']} 只股票")
+            print(f"成功: {stats['success']} 只 ({stats['success']/stats['total']*100:.1f}%)")
+            print(f"失败: {stats['failed']} 只 ({stats['failed']/stats['total']*100:.1f}%)")
+            print("=" * 60)
+        else:
+            print("\n" + "=" * 60)
+            print(f"数据预加载被中断")
+            print(f"已处理: {completed}/{stats['total']} 只股票")
+            print(f"成功: {stats['success']} 只")
+            print(f"失败: {stats['failed']} 只")
+            print("=" * 60)
         
         return preloaded_data
     
@@ -368,61 +416,168 @@ class ScoringStrategy(BaseStrategy):
         print(f"\n开始计算 {total} 只股票的评分...")
         print("=" * 60)
         
-        for stock_code, data in tqdm(preloaded_data.items(), desc="计算评分进度", total=total):
-            try:
-                stock_name = data.get('stock_name', stock_name_map.get(stock_code, ""))
-                kline_data = data['kline_data']
-                fundamental_data = data['fundamental_data']
-                financial_data = data['financial_data']
-                sector_kline_list = data['sector_kline_list']
-                concept_kline_list = data['concept_kline_list']
-                
-                # 计算各维度得分
-                fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
-                volume_score = self.volume_scorer.score(kline_data)
-                price_score = self.price_scorer.score(kline_data)
-                sector_score = self.sector_scorer.score(sector_kline_list, kline_data)
-                concept_score = self.concept_scorer.score(concept_kline_list, kline_data)
-                
-                # 计算综合得分
-                total_score = (
-                    fundamental_score * self.weights['fundamental'] +
-                    volume_score * self.weights['volume'] +
-                    price_score * self.weights['price'] +
-                    sector_score * self.weights['sector'] +
-                    concept_score * self.weights['concept']
-                )
-                
-                # 获取当前价格信息
-                current_price = kline_data['close'].iloc[-1] if not kline_data.empty else 0
-                current_volume = kline_data['volume'].iloc[-1] if not kline_data.empty else 0
-                
-                result = {
-                    'code': stock_code,
-                    'name': stock_name,
-                    'score': round(total_score, 2),
-                    'total_score': round(total_score, 2),
-                    'fundamental_score': round(fundamental_score, 2),
-                    'volume_score': round(volume_score, 2),
-                    'price_score': round(price_score, 2),
-                    'sector_score': round(sector_score, 2),
-                    'concept_score': round(concept_score, 2),
-                    'current_price': round(current_price, 2),
-                    'current_volume': current_volume,
-                    'pe_ratio': fundamental_data.get('pe_ratio', 0),
-                    'pb_ratio': fundamental_data.get('pb_ratio', 0),
-                    'roe': financial_data.get('roe', 0),
-                }
-                
-                results.append(result)
-            except Exception as e:
-                print(f"计算 {stock_code} {stock_name_map.get(stock_code, '')} 评分时出错: {e}")
-                continue
+        try:
+            for stock_code, data in tqdm(preloaded_data.items(), desc="计算评分进度", total=total):
+                try:
+                    stock_name = data.get('stock_name', stock_name_map.get(stock_code, ""))
+                    kline_data = data['kline_data']
+                    fundamental_data = data['fundamental_data']
+                    financial_data = data['financial_data']
+                    sector_kline_list = data['sector_kline_list']
+                    concept_kline_list = data['concept_kline_list']
+                    
+                    # 计算各维度得分
+                    fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
+                    volume_score = self.volume_scorer.score(kline_data)
+                    price_score = self.price_scorer.score(kline_data)
+                    sector_score = self.sector_scorer.score(sector_kline_list, kline_data)
+                    concept_score = self.concept_scorer.score(concept_kline_list, kline_data)
+                    
+                    # 计算综合得分
+                    total_score = (
+                        fundamental_score * self.weights['fundamental'] +
+                        volume_score * self.weights['volume'] +
+                        price_score * self.weights['price'] +
+                        sector_score * self.weights['sector'] +
+                        concept_score * self.weights['concept']
+                    )
+                    
+                    # 获取当前价格信息
+                    current_price = kline_data['close'].iloc[-1] if not kline_data.empty else 0
+                    current_volume = kline_data['volume'].iloc[-1] if not kline_data.empty else 0
+                    
+                    result = {
+                        'code': stock_code,
+                        'name': stock_name,
+                        'score': round(total_score, 2),
+                        'total_score': round(total_score, 2),
+                        'fundamental_score': round(fundamental_score, 2),
+                        'volume_score': round(volume_score, 2),
+                        'price_score': round(price_score, 2),
+                        'sector_score': round(sector_score, 2),
+                        'concept_score': round(concept_score, 2),
+                        'current_price': round(current_price, 2),
+                        'current_volume': current_volume,
+                        'pe_ratio': fundamental_data.get('pe_ratio', 0),
+                        'pb_ratio': fundamental_data.get('pb_ratio', 0),
+                        'roe': financial_data.get('roe', 0),
+                        'sectors': data.get('sectors', []),  # 添加板块信息
+                        'concepts': data.get('concepts', []),  # 添加概念信息
+                        'sector_count': len(data.get('sectors', [])),  # 板块数量
+                        'concept_count': len(data.get('concepts', [])),  # 概念数量
+                        'has_sector_kline': len(data.get('sector_kline_list', [])) > 0,  # 是否有板块K线数据
+                        'has_concept_kline': len(data.get('concept_kline_list', [])) > 0,  # 是否有概念K线数据
+                    }
+                    
+                    results.append(result)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    print(f"计算 {stock_code} {stock_name_map.get(stock_code, '')} 评分时出错: {e}")
+                    continue
+        except KeyboardInterrupt:
+            print(f"\n[中断] 评分计算被中断，已计算 {len(results)} 只股票的评分")
+            raise
         
         print(f"\n评分计算完成！共计算 {len(results)} 只股票的评分")
         print("=" * 60)
         
         return results
+    
+    def calculate_sector_trends(self, results: List[Dict]) -> List[Dict]:
+        """
+        计算板块趋势涨幅TOP 3
+        Args:
+            results: 股票评分结果列表
+        Returns:
+            板块趋势涨幅TOP 3列表
+        """
+        import numpy as np
+        sector_trends = {}  # {sector_name: {'stocks': count, 'avg_score': float, 'trend': float}}
+        
+        for result in results:
+            sectors = result.get('sectors', [])
+            sector_score = result.get('sector_score', 50)
+            
+            for sector in sectors:
+                if sector not in sector_trends:
+                    # 获取板块K线数据计算涨幅
+                    try:
+                        sector_kline = self.data_fetcher.get_sector_kline(sector)
+                        trend = 0.0
+                        if sector_kline is not None and not sector_kline.empty:
+                            if 'close' in sector_kline.columns:
+                                closes = sector_kline['close'].values
+                            elif '收盘' in sector_kline.columns:
+                                closes = sector_kline['收盘'].values
+                            else:
+                                closes = []
+                            
+                            if len(closes) >= 20:
+                                # 计算20日涨幅
+                                trend = (closes[-1] - closes[-20]) / closes[-20] if closes[-20] > 0 else 0
+                            elif len(closes) >= 5:
+                                # 计算5日涨幅
+                                trend = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
+                    except:
+                        trend = 0.0
+                    
+                    sector_trends[sector] = {
+                        'sector': sector,
+                        'trend': trend * 100,  # 转换为百分比
+                        'stock_count': 0,
+                        'avg_score': 0.0
+                    }
+                
+                sector_trends[sector]['stock_count'] += 1
+                sector_trends[sector]['avg_score'] = (
+                    (sector_trends[sector]['avg_score'] * (sector_trends[sector]['stock_count'] - 1) + sector_score) 
+                    / sector_trends[sector]['stock_count']
+                )
+        
+        # 按涨幅降序排序，取TOP 3
+        sorted_sectors = sorted(sector_trends.values(), key=lambda x: x['trend'], reverse=True)
+        return sorted_sectors[:3]
+    
+    def calculate_hot_concepts(self, results: List[Dict]) -> List[Dict]:
+        """
+        计算热点概念（按概念评分和涉及股票数量）
+        Args:
+            results: 股票评分结果列表
+        Returns:
+            热点概念列表（最多10个）
+        """
+        concept_stats = {}  # {concept_name: {'stocks': count, 'avg_score': float, 'total_score': float}}
+        
+        for result in results:
+            concepts = result.get('concepts', [])
+            concept_score = result.get('concept_score', 50)
+            
+            for concept in concepts:
+                if concept not in concept_stats:
+                    concept_stats[concept] = {
+                        'concept': concept,
+                        'stock_count': 0,
+                        'avg_score': 0.0,
+                        'total_score': 0.0
+                    }
+                
+                concept_stats[concept]['stock_count'] += 1
+                concept_stats[concept]['total_score'] += concept_score
+                concept_stats[concept]['avg_score'] = concept_stats[concept]['total_score'] / concept_stats[concept]['stock_count']
+        
+        # 按平均评分和股票数量加权排序（评分权重70%，股票数量权重30%）
+        for concept_name, stats in concept_stats.items():
+            # 归一化股票数量（假设最多100只）
+            normalized_count = min(stats['stock_count'] / 100.0, 1.0)
+            # 归一化评分
+            normalized_score = stats['avg_score'] / 100.0
+            # 综合热度 = 0.7 * 评分 + 0.3 * 股票数量
+            stats['hot_score'] = 0.7 * normalized_score + 0.3 * normalized_count
+        
+        # 按热度降序排序，取TOP 10
+        sorted_concepts = sorted(concept_stats.values(), key=lambda x: x['hot_score'], reverse=True)
+        return sorted_concepts[:10]
     
     def select_top_stocks(self, stock_codes: List[str] = None, top_n: int = 20, 
                          board_types: List[str] = None, max_workers: int = 5) -> pd.DataFrame:
@@ -518,13 +673,21 @@ class ScoringStrategy(BaseStrategy):
                     data_availability['financial']['available'] += 1
                 
                 # 统计板块数据可用性（检查是否有板块K线数据）
+                # 注意：50分可能是真实评分，不能仅凭50分判断数据不可用
+                # 应该检查是否有板块信息或板块K线数据
                 data_availability['sector']['total'] += 1
-                if result.get('sector_score', 0) != 0 and result.get('sector_score', 0) != 50:  # 50是默认分
+                # 如果板块评分存在且不是默认的50分，或者有板块信息，认为数据可用
+                sector_score = result.get('sector_score', 50)
+                has_sector_info = result.get('sectors', []) or result.get('sector_count', 0) > 0
+                if (sector_score != 50) or has_sector_info:
                     data_availability['sector']['available'] += 1
                 
                 # 统计概念数据可用性（检查是否有概念K线数据）
                 data_availability['concept']['total'] += 1
-                if result.get('concept_score', 0) != 0 and result.get('concept_score', 0) != 50:  # 50是默认分
+                # 如果概念评分存在且不是默认的50分，或者有概念信息，认为数据可用
+                concept_score = result.get('concept_score', 50)
+                has_concept_info = result.get('concepts', []) or result.get('concept_count', 0) > 0
+                if (concept_score != 50) or has_concept_info:
                     data_availability['concept']['available'] += 1
         
         def adjust_weights_by_availability(availability_stats: Dict) -> Dict:
@@ -557,10 +720,13 @@ class ScoringStrategy(BaseStrategy):
             if sector_ratio == 0:
                 adjusted_weights['sector'] = 0
                 print(f"  警告: 所有股票都缺失板块数据，已移除板块权重")
+                print(f"    提示: 板块数据需要：1) 股票有行业信息 2) 能找到对应的行业指数 3) 能获取指数K线数据")
+                print(f"    可能原因: 行业指数匹配失败、指数K线数据获取失败、或需要2000积分")
             
             if concept_ratio == 0:
                 adjusted_weights['concept'] = 0
                 print(f"  警告: 所有股票都缺失概念数据，已移除概念权重")
+                print(f"    提示: 概念数据需要2000积分以上才能获取，免费用户无法使用概念评分")
             
             # 重新归一化权重（确保总和为1）
             total_weight = sum(adjusted_weights.values())
@@ -641,6 +807,22 @@ class ScoringStrategy(BaseStrategy):
         if 'code' in df.columns and 'name' in df.columns:
             cols = ['code', 'name'] + [col for col in df.columns if col not in ['code', 'name']]
             df = df[cols]
+        
+        # 计算板块趋势涨幅TOP 3和热点概念
+        print("\n" + "=" * 60)
+        print("计算板块趋势和热点概念...")
+        print("=" * 60)
+        self._top_sectors = self.calculate_sector_trends(results)
+        self._hot_concepts = self.calculate_hot_concepts(results)
+        
+        # 格式化板块和概念信息用于显示
+        for idx, row in df.iterrows():
+            sectors = row.get('sectors', [])
+            concepts = row.get('concepts', [])
+            if isinstance(sectors, list):
+                df.at[idx, 'sectors'] = ', '.join(sectors) if sectors else '无'
+            if isinstance(concepts, list):
+                df.at[idx, 'concepts'] = ', '.join(concepts[:5]) if concepts else '无'  # 最多显示5个概念
         
         return df
 

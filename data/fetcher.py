@@ -41,6 +41,7 @@ def get_analysis_date() -> datetime:
     获取用于分析的数据日期
     - 如果当前在交易时间内，使用昨天的数据（今天数据不完整）
     - 如果当前不在交易时间，使用最近一个交易日的数据
+    - 如果已经收盘（15:00之后），使用今天的数据
     Returns:
         用于分析的日期
     """
@@ -64,16 +65,16 @@ def get_analysis_date() -> datetime:
         analysis_date = now - timedelta(days=days_back)
     # 如果是工作日但不在交易时间
     else:
+        # 如果已经过了15:00，可以使用今天的数据（收盘后）
+        if current_time >= datetime.strptime('15:00', '%H:%M').time():
+            analysis_date = now
         # 如果还没到9:30，使用昨天的数据
-        if current_time < datetime.strptime('09:30', '%H:%M').time():
+        elif current_time < datetime.strptime('09:30', '%H:%M').time():
             analysis_date = now - timedelta(days=1)
             # 如果昨天是周末，继续往前推
             while analysis_date.weekday() >= 5:
                 analysis_date = analysis_date - timedelta(days=1)
-        # 如果已经过了15:00，可以使用今天的数据（收盘后）
-        elif current_time >= datetime.strptime('15:00', '%H:%M').time():
-            analysis_date = now
-        # 其他情况（午休时间等），使用昨天的数据
+        # 其他情况（午休时间11:30-13:00），使用昨天的数据
         else:
             analysis_date = now - timedelta(days=1)
             while analysis_date.weekday() >= 5:
@@ -87,6 +88,7 @@ def should_use_yesterday_data() -> bool:
     判断是否应该使用昨天的数据进行分析
     - 如果今天还在交易中，使用昨天的完整数据
     - 如果今天还没开盘，使用昨天的数据
+    - 如果已经收盘（15:00之后），使用今天的数据
     Returns:
         是否应该使用昨天的数据
     """
@@ -94,9 +96,13 @@ def should_use_yesterday_data() -> bool:
     current_time = now.time()
     weekday = now.weekday()
     
-    # 周末使用最近一个交易日的数据
+    # 周末使用最近一个交易日的数据（昨天的）
     if weekday >= 5:
         return True
+    
+    # 如果已经过了15:00，可以使用今天的数据（收盘后）
+    if current_time >= datetime.strptime('15:00', '%H:%M').time():
+        return False
     
     # 如果当前在交易时间内，使用昨天的数据（今天数据不完整）
     if is_trading_time():
@@ -106,11 +112,7 @@ def should_use_yesterday_data() -> bool:
     if current_time < datetime.strptime('09:30', '%H:%M').time():
         return True
     
-    # 如果已经过了15:00，可以使用今天的数据（收盘后）
-    if current_time >= datetime.strptime('15:00', '%H:%M').time():
-        return False
-    
-    # 其他情况（午休时间等），使用昨天的数据
+    # 其他情况（午休时间11:30-13:00等），使用昨天的数据
     return True
 
 
@@ -129,8 +131,10 @@ def filter_stocks_by_board(stock_list: pd.DataFrame, board_types: List[str]) -> 
     if not board_types:
         return stock_list
     
-    # 将代码列转换为字符串
-    codes = stock_list['code'].astype(str)
+    # 将代码列转换为字符串，并格式化为6位（补零）
+    stock_list = stock_list.copy()
+    stock_list['code'] = stock_list['code'].astype(str).str.zfill(6)
+    codes = stock_list['code']
     
     # 定义板块代码规则
     board_rules = {
@@ -356,6 +360,8 @@ class DataFetcher:
                     # 只保留A股（排除B股等）
                     df = df[df['code'].str.len() == 6]
                     df = df[df['code'].str.match(r'^\d{6}$')]
+                    # 确保代码是字符串类型，并格式化为6位（补零）
+                    df['code'] = df['code'].astype(str).str.zfill(6)
                     return df[['code', 'name']]
                 return None
             
@@ -434,11 +440,13 @@ class DataFetcher:
             
             if end_date is None:
                 if use_yesterday:
+                    # 使用昨天的数据（交易时间内或开盘前）
                     end_date_obj = analysis_date - timedelta(days=1)
                     while end_date_obj.weekday() >= 5:
                         end_date_obj = end_date_obj - timedelta(days=1)
                     end_date = end_date_obj.strftime('%Y%m%d')
                 else:
+                    # 收盘后（15:00之后）可以使用今天的数据
                     end_date = analysis_date.strftime('%Y%m%d')
             
             # 如果start_date >= end_date，说明缓存已经是最新的，直接返回缓存
@@ -722,12 +730,12 @@ class DataFetcher:
                 return []
             
             def fetch_sectors():
-                # 获取股票所属行业
+                # 获取股票所属行业（板块）
                 df = self.pro.stock_basic(ts_code=ts_code, fields='ts_code,industry')
                 if df is not None and not df.empty:
                     industry = df.iloc[0].get('industry', '')
-                    if industry:
-                        return [industry]
+                    if industry and industry.strip():
+                        return [industry.strip()]
                 return []
             
             sectors = self._retry_request(fetch_sectors, max_retries=2, timeout=10)
@@ -764,10 +772,17 @@ class DataFetcher:
             
             def fetch_concepts():
                 # 获取股票所属概念
-                concept_df = self.pro.concept_detail(ts_code=ts_code, fields='id,name')
-                if concept_df is not None and not concept_df.empty:
-                    concepts = concept_df['name'].tolist()
-                    return concepts
+                try:
+                    concept_df = self.pro.concept_detail(ts_code=ts_code, fields='id,name')
+                    if concept_df is not None and not concept_df.empty:
+                        concepts = concept_df['name'].dropna().tolist()
+                        # 过滤空字符串
+                        concepts = [c.strip() for c in concepts if c and c.strip()]
+                        return concepts
+                except Exception as e:
+                    # 可能是积分不足或其他错误
+                    if self.progress_callback:
+                        self.progress_callback('info', f"获取概念数据失败（可能需要2000积分）: {e}")
                 return []
             
             concepts = self._retry_request(fetch_concepts, max_retries=2, timeout=15)
@@ -786,7 +801,7 @@ class DataFetcher:
     
     def get_sector_kline(self, sector_name: str, period: str = "daily") -> Optional[pd.DataFrame]:
         """
-        获取板块K线数据（支持内存缓存）
+        获取板块K线数据（支持内存缓存和磁盘缓存）
         通过行业指数获取板块K线数据
         """
         try:
@@ -796,6 +811,15 @@ class DataFetcher:
                 if cache_key in self._sector_kline_cache:
                     return self._sector_kline_cache[cache_key].copy()
             
+            # 检查磁盘缓存
+            if not self.force_refresh:
+                cached_kline = self.cache_manager.get_kline(sector_name, 'sector', period, False)
+                if cached_kline is not None and not cached_kline.empty:
+                    # 存入内存缓存
+                    with self._cache_lock:
+                        self._sector_kline_cache[cache_key] = cached_kline
+                    return cached_kline
+            
             # 通过行业指数获取板块K线数据
             def fetch_sector_kline():
                 # 1. 获取行业指数列表
@@ -804,21 +828,34 @@ class DataFetcher:
                     return None
                 
                 # 2. 查找匹配的行业指数（通过名称匹配）
-                # 简化匹配：如果板块名称包含在指数名称中，或指数名称包含在板块名称中
+                # 优化匹配逻辑：先精确匹配，再模糊匹配
                 matched_index = None
+                sector_name_clean = sector_name.strip()
+                
+                # 精确匹配：板块名称完全匹配或包含在指数名称中
                 for _, row in index_df.iterrows():
                     index_name = row['name']
-                    if sector_name in index_name or index_name in sector_name:
+                    if sector_name_clean in index_name or index_name in sector_name_clean:
                         matched_index = row['ts_code']
                         break
                 
                 # 如果没找到精确匹配，尝试模糊匹配
                 if matched_index is None:
-                    # 使用第一个包含行业关键词的指数
+                    # 提取板块名称的关键词（去除常见后缀）
+                    keywords = sector_name_clean.replace('行业', '').replace('板块', '').strip()
+                    if len(keywords) >= 2:
+                        for _, row in index_df.iterrows():
+                            index_name = row['name']
+                            # 检查关键词是否在指数名称中
+                            if keywords in index_name or any(kw in index_name for kw in [keywords[:2], keywords[:3]] if len(kw) >= 2):
+                                matched_index = row['ts_code']
+                                break
+                
+                # 如果还是没找到，尝试使用行业名称的前几个字符匹配
+                if matched_index is None and len(sector_name_clean) >= 2:
                     for _, row in index_df.iterrows():
                         index_name = row['name']
-                        # 简单的关键词匹配
-                        if any(keyword in index_name for keyword in ['行业', '指数']) and sector_name[:2] in index_name:
+                        if sector_name_clean[:2] in index_name or sector_name_clean[:3] in index_name:
                             matched_index = row['ts_code']
                             break
                 
@@ -861,6 +898,8 @@ class DataFetcher:
                 # 存入内存缓存
                 with self._cache_lock:
                     self._sector_kline_cache[cache_key] = sector_kline
+                # 保存到磁盘缓存
+                self.cache_manager.save_kline(sector_name, sector_kline, 'sector', period, incremental=True)
                 return sector_kline
             
         except Exception as e:
@@ -872,7 +911,7 @@ class DataFetcher:
     
     def get_concept_kline(self, concept_name: str, period: str = "daily") -> Optional[pd.DataFrame]:
         """
-        获取概念K线数据（支持内存缓存）
+        获取概念K线数据（支持内存缓存和磁盘缓存）
         通过概念成分股计算概念指数
         """
         try:
@@ -881,6 +920,15 @@ class DataFetcher:
             with self._cache_lock:
                 if cache_key in self._concept_kline_cache:
                     return self._concept_kline_cache[cache_key].copy()
+            
+            # 检查磁盘缓存
+            if not self.force_refresh:
+                cached_kline = self.cache_manager.get_kline(concept_name, 'concept', period, False)
+                if cached_kline is not None and not cached_kline.empty:
+                    # 存入内存缓存
+                    with self._cache_lock:
+                        self._concept_kline_cache[cache_key] = cached_kline
+                    return cached_kline
             
             # 通过概念成分股计算概念指数
             def fetch_concept_kline():
@@ -904,13 +952,56 @@ class DataFetcher:
                 if stock_df is None or stock_df.empty:
                     return None
                 
-                # 4. 获取所有成分股的K线数据并计算概念指数
+                # 3.1 获取成分股市值并按市值排序，取TOP20
                 analysis_date = get_analysis_date()
+                trade_date = analysis_date.strftime('%Y%m%d')
+                
+                # 获取所有成分股的市值数据
+                stock_codes = stock_df['ts_code'].tolist()
+                stock_market_cap = []
+                
+                for ts_code in stock_codes:
+                    try:
+                        # 获取股票的最新市值数据（使用daily_basic接口）
+                        daily_basic = self.pro.daily_basic(ts_code=ts_code, trade_date=trade_date, fields='ts_code,total_mv')
+                        if daily_basic is not None and not daily_basic.empty and 'total_mv' in daily_basic.columns:
+                            market_cap = daily_basic.iloc[0]['total_mv']
+                            if pd.notna(market_cap) and market_cap > 0:
+                                stock_market_cap.append({'ts_code': ts_code, 'total_mv': market_cap})
+                    except:
+                        continue  # 跳过获取失败的股票
+                
+                # 如果没有获取到市值数据，尝试使用最近一个交易日的数据
+                if not stock_market_cap:
+                    # 获取最近5个交易日的数据
+                    for ts_code in stock_codes[:50]:  # 限制最多50只，避免请求过多
+                        try:
+                            end_date = analysis_date.strftime('%Y%m%d')
+                            start_date = (analysis_date - timedelta(days=5)).strftime('%Y%m%d')
+                            daily_basic = self.pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date, fields='ts_code,trade_date,total_mv')
+                            if daily_basic is not None and not daily_basic.empty:
+                                # 取最新的市值数据
+                                latest = daily_basic.sort_values('trade_date', ascending=False).iloc[0]
+                                market_cap = latest['total_mv']
+                                if pd.notna(market_cap) and market_cap > 0:
+                                    stock_market_cap.append({'ts_code': ts_code, 'total_mv': market_cap})
+                        except:
+                            continue
+                
+                # 按市值降序排序，取TOP20（不足20只取全部）
+                if stock_market_cap:
+                    stock_market_cap.sort(key=lambda x: x['total_mv'], reverse=True)
+                    top_stocks = [item['ts_code'] for item in stock_market_cap[:20]]
+                else:
+                    # 如果获取市值失败，使用原始的前20只股票
+                    top_stocks = stock_codes[:20]
+                
+                # 4. 获取TOP20成分股的K线数据并计算概念指数
                 start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
                 end_date = analysis_date.strftime('%Y%m%d')
                 
                 concept_kline_dict = {}
-                stock_codes = stock_df['ts_code'].tolist()[:20]  # 限制最多20只股票，避免请求过多
+                stock_codes = top_stocks  # 使用市值TOP20的股票
                 
                 for ts_code in stock_codes:
                     try:
@@ -960,6 +1051,8 @@ class DataFetcher:
                 # 存入内存缓存
                 with self._cache_lock:
                     self._concept_kline_cache[cache_key] = concept_kline
+                # 保存到磁盘缓存
+                self.cache_manager.save_kline(concept_name, concept_kline, 'concept', period, incremental=True)
                 return concept_kline
             
         except Exception as e:

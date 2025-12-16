@@ -10,6 +10,8 @@ from typing import List, Optional
 from strategies import ScoringStrategy
 from strategies.base_strategy import BaseStrategy
 import config
+import os
+import sys
 
 
 class StockSelector:
@@ -74,8 +76,15 @@ class StockSelector:
             filename = f'stock_selection_results_{strategy_name}_{timestamp}.xlsx'
         
         if not df.empty:
-            df.to_excel(filename, index=True, engine='openpyxl')
-            print(f"结果已保存到: {filename}")
+            try:
+                df.to_excel(filename, index=True, engine='openpyxl')
+                # 确保文件句柄关闭
+                del df
+                import time
+                time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
+                print(f"结果已保存到: {filename}")
+            except Exception as e:
+                print(f"保存结果失败: {e}")
         else:
             print("没有数据可保存")
     
@@ -86,6 +95,99 @@ class StockSelector:
             cache_type: 缓存类型，None表示清除所有
         """
         self.strategy.data_fetcher.cache_manager.clear_cache(cache_type)
+
+
+def _check_tushare_token():
+    """
+    检查Tushare Token配置（前置检查）
+    Returns:
+        bool: Token配置有效返回True，否则返回False
+    """
+    try:
+        import tushare as ts
+    except ImportError:
+        print("\n" + "=" * 60)
+        print("[错误] 未安装tushare包")
+        print("=" * 60)
+        print("请运行: pip install tushare")
+        print("=" * 60)
+        return False
+    
+    # 尝试从环境变量获取
+    token = os.environ.get('TUSHARE_TOKEN')
+    token_source = "环境变量"
+    
+    if not token:
+        # 从config获取
+        if hasattr(config, 'TUSHARE_TOKEN') and config.TUSHARE_TOKEN:
+            token = config.TUSHARE_TOKEN
+            token_source = "config.py"
+    
+    if not token:
+        print("\n" + "=" * 60)
+        print("[错误] 未找到Token配置")
+        print("=" * 60)
+        print("\n请使用以下方式之一配置Token：")
+        print("\n方式1：设置环境变量（推荐）")
+        print("  Windows PowerShell:")
+        print("    $env:TUSHARE_TOKEN='your_token_here'")
+        print("  Windows CMD:")
+        print("    set TUSHARE_TOKEN=your_token_here")
+        print("  Linux/Mac:")
+        print("    export TUSHARE_TOKEN='your_token_here'")
+        print("\n方式2：在config.py中设置")
+        print("    TUSHARE_TOKEN = 'your_token_here'")
+        print("\n方式3：在代码中设置")
+        print("    import tushare as ts")
+        print("    ts.set_token('your_token_here')")
+        print("\n获取Token请访问: https://tushare.pro/register")
+        print("=" * 60)
+        return False
+    
+    # 设置Token并测试有效性
+    try:
+        ts.set_token(token)
+        pro = ts.pro_api()
+        
+        # 测试连接
+        test_date = '20241215'
+        df = pro.trade_cal(exchange='SSE', start_date=test_date, end_date=test_date)
+        
+        if df is None or df.empty:
+            print("\n" + "=" * 60)
+            print("[错误] Token可能无效，返回空结果")
+            print("=" * 60)
+            print("\n建议：")
+            print("1. 登录 https://tushare.pro/ 检查Token和积分")
+            print("2. 重新复制最新的Token")
+            print("=" * 60)
+            return False
+        
+        # Token有效，继续执行
+        return True
+        
+    except Exception as e:
+        error_msg = str(e)
+        print("\n" + "=" * 60)
+        print(f"[错误] Token配置验证失败: {e}")
+        print("=" * 60)
+        
+        if "权限" in error_msg or "积分" in error_msg or "token" in error_msg.lower():
+            print("\n可能的原因：")
+            print("1. Token无效或已过期")
+            print("2. 积分不足")
+            print("3. 权限不足")
+            print("\n建议：")
+            print("1. 登录 https://tushare.pro/ 检查Token和积分")
+            print("2. 重新复制最新的Token")
+            print("3. 如果积分不足，需要充值或等待积分恢复")
+        else:
+            print("\n可能的原因：")
+            print("1. 网络连接问题")
+            print("2. Tushare服务异常")
+            print("3. Token格式错误")
+        print("=" * 60)
+        return False
 
 
 def _print_status_info():
@@ -181,8 +283,38 @@ def _print_results(results: pd.DataFrame, selector: StockSelector):
     pd.set_option('display.unicode.east_asian_width', True)
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', None)
-    pd.set_option('display.max_colwidth', None)
-    print(results.to_string(index=False))
+    pd.set_option('display.max_colwidth', 30)  # 限制列宽以便显示更多列
+    
+    # 选择要显示的列（包含板块和概念）
+    display_cols = ['code', 'name', 'score', 'fundamental_score', 'volume_score', 
+                    'price_score', 'sector_score', 'concept_score']
+    if 'sectors' in results.columns:
+        display_cols.append('sectors')
+    if 'concepts' in results.columns:
+        display_cols.append('concepts')
+    
+    available_cols = [col for col in display_cols if col in results.columns]
+    print(results[available_cols].to_string(index=False))
+    
+    # 显示板块趋势涨幅TOP 3
+    if hasattr(selector.strategy, '_top_sectors') and selector.strategy._top_sectors:
+        print("\n" + "=" * 60)
+        print("【板块趋势涨幅TOP 3】")
+        print("-" * 60)
+        for i, sector_info in enumerate(selector.strategy._top_sectors, 1):
+            print(f"{i}. {sector_info['sector']}: 涨幅 {sector_info['trend']:.2f}% "
+                  f"(涉及股票: {sector_info['stock_count']}只, 平均评分: {sector_info['avg_score']:.2f})")
+        print("=" * 60)
+    
+    # 显示热点概念
+    if hasattr(selector.strategy, '_hot_concepts') and selector.strategy._hot_concepts:
+        print("\n" + "=" * 60)
+        print("【热点概念TOP 10】")
+        print("-" * 60)
+        for i, concept_info in enumerate(selector.strategy._hot_concepts, 1):
+            print(f"{i}. {concept_info['concept']}: 平均评分 {concept_info['avg_score']:.2f} "
+                  f"(涉及股票: {concept_info['stock_count']}只, 热度: {concept_info['hot_score']:.3f})")
+        print("=" * 60)
     
     # 显示评分公式
     print("\n" + "=" * 60)
@@ -215,6 +347,10 @@ def main():
     parser.add_argument('--workers', type=int, default=config.DEFAULT_MAX_WORKERS, help='线程数')
     args = parser.parse_args()
     
+    # 前置检查：验证Tushare Token配置
+    if not _check_tushare_token():
+        sys.exit(1)
+    
     # 打印状态信息
     _print_status_info()
     if args.refresh:
@@ -227,11 +363,7 @@ def main():
     # 执行选股
     try:
         print("\n" + "=" * 60)
-        print("开始执行选股流程")
-        print("=" * 60)
-        print("注意：数据获取和计算已分离为两个独立阶段")
-        print("  阶段1: 数据预加载 - 获取所有股票的数据")
-        print("  阶段2: 评分计算 - 基于预加载的数据计算评分")
+        print("开始执行选股")
         print("=" * 60)
         
         results = selector.select_top_stocks(
@@ -241,7 +373,18 @@ def main():
             max_workers=args.workers
         )
     except KeyboardInterrupt:
-        print("\n程序被用户中断")
+        print("\n" + "=" * 60)
+        print("程序被用户中断（Ctrl+C）")
+        print("=" * 60)
+        try:
+            # 保存已获取的缓存数据
+            saved_count = selector.strategy.data_fetcher.flush_batch_cache()
+            if saved_count > 0:
+                print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
+            print("[提示] 已保存的数据将在下次运行时继续使用，无需重新下载")
+        except Exception as cache_error:
+            print(f"[警告] 保存缓存失败: {cache_error}")
+        print("=" * 60)
         return
     except Exception as e:
         print(f"\n程序执行出错: {e}")
