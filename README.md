@@ -587,6 +587,79 @@ A: 总评分 = Σ(各维度得分 × 对应权重)
 
 完成以上步骤后，您就可以正常使用股票选股程序了！
 
+## Git 中文提交信息乱码问题解决方案
+
+### 问题说明
+
+在Windows PowerShell中使用Git提交中文信息时，可能会出现乱码问题。这是因为PowerShell和Git的默认编码设置导致的。
+
+### 解决方案
+
+执行以下命令进行配置：
+
+```powershell
+# 设置Git全局配置
+git config --global core.quotepath false
+git config --global i18n.commitencoding utf-8
+git config --global i18n.logoutputencoding utf-8
+git config --global core.autocrlf false
+
+# 设置PowerShell编码（每次打开PowerShell时执行）
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+chcp 65001
+```
+
+### 验证配置
+
+运行以下命令验证配置是否生效：
+
+```powershell
+git config --global --list | Select-String -Pattern "encoding|utf|i18n"
+```
+
+应该看到：
+- `i18n.commitencoding=utf-8`
+- `i18n.logoutputencoding=utf-8`
+
+### 提交信息最佳实践
+
+1. **使用UTF-8编码**：确保提交信息使用UTF-8编码
+2. **使用文件方式提交**：如果直接在命令行输入中文有问题，可以使用文件方式：
+   ```powershell
+   # 创建提交信息文件
+   "优化代码结构和功能改进" | Out-File -Encoding utf8 commit_msg.txt
+   
+   # 使用文件提交
+   git commit -F commit_msg.txt
+   ```
+3. **使用提交模板**：项目已配置了提交模板（`.gitmessage`），使用 `git commit` 时会自动打开模板
+
+### 永久解决方案
+
+将以下内容添加到PowerShell配置文件（`$PROFILE`）中：
+
+```powershell
+# Git UTF-8编码设置
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+chcp 65001 | Out-Null
+```
+
+查看配置文件路径：
+```powershell
+$PROFILE
+```
+
+如果文件不存在，创建它：
+```powershell
+New-Item -Path $PROFILE -Type File -Force
+```
+
+然后使用文本编辑器添加上述内容。
+
+**注意**：如果PowerShell显示仍有乱码，这是**显示问题**，实际提交到GitHub的内容是正确的。可以在GitHub网页上查看提交信息，确认是否正确显示。
+
 ## 许可证
 
 本项目仅供学习和研究使用。
