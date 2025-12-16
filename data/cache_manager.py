@@ -162,6 +162,24 @@ class CacheManager:
             cache_type: 缓存类型
         """
         try:
+            # 对于sectors和concepts类型，如果文件损坏，直接删除，让程序重新创建
+            if cache_type in ['sectors', 'concepts']:
+                try:
+                    # 备份损坏的文件
+                    backup_file = cache_file.replace('.xlsx', '_backup.xlsx')
+                    if os.path.exists(cache_file):
+                        try:
+                            os.rename(cache_file, backup_file)
+                        except:
+                            # 如果重命名失败，直接删除
+                            try:
+                                os.remove(cache_file)
+                            except:
+                                pass
+                except:
+                    pass
+                return
+            
             # 尝试从独立文件恢复数据
             if cache_type == 'fundamental':
                 cache_dir = self.fundamental_cache_dir
@@ -756,95 +774,271 @@ class CacheManager:
             except Exception as e:
                 print(f"批量保存财务缓存失败: {e}")
     
-    def get_stock_sectors(self, stock_code: str, force_refresh: bool = False) -> List[str]:
+    def get_stock_sectors(self, stock_code: str, force_refresh: bool = False) -> Optional[List[str]]:
         """
         从缓存获取股票板块
         Args:
             stock_code: 股票代码
             force_refresh: 是否强制刷新
         Returns:
-            板块列表
+            板块列表，如果缓存中没有数据返回None，如果缓存中保存了空列表返回[]
         """
         if not force_refresh and self._is_cache_valid(self.sectors_cache, 'sectors'):
             try:
+                # 检查文件是否损坏
+                if not self._is_excel_file_valid(self.sectors_cache):
+                    # 文件损坏，尝试修复
+                    self._repair_corrupted_cache(self.sectors_cache, 'sectors')
+                    # 如果修复失败，返回None
+                    if not os.path.exists(self.sectors_cache) or not self._is_excel_file_valid(self.sectors_cache):
+                        return None
+                
                 df = pd.read_excel(self.sectors_cache, engine='openpyxl')
+                # 确保code列是字符串格式
+                if 'code' in df.columns:
+                    df['code'] = df['code'].astype(str).str.zfill(6)
                 stock_data = df[df['code'] == stock_code]
                 if not stock_data.empty:
                     sectors_str = stock_data.iloc[0].get('sectors', '')
+                    # 如果sectors字段存在但为空字符串，说明之前保存了空列表
+                    if sectors_str == '':
+                        # 检查缓存时间，如果超过3天，返回None让fetcher重新获取
+                        update_time_str = stock_data.iloc[0].get('update_time', '')
+                        if update_time_str:
+                            try:
+                                update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
+                                days_old = (datetime.now() - update_time).days
+                                if days_old > 3:  # 空列表缓存超过3天，重新获取
+                                    return None
+                            except:
+                                pass
+                        return []
+                    # 如果sectors字段有值，返回解析后的列表
                     return sectors_str.split(',') if sectors_str else []
             except Exception as e:
                 print(f"读取板块缓存失败: {e}")
-        return []
+        # 缓存中没有数据，返回None
+        return None
     
     def save_stock_sectors(self, stock_code: str, sectors: List[str]):
         """
         保存股票板块到缓存
         Args:
             stock_code: 股票代码
-            sectors: 板块列表
+            sectors: 板块列表（空列表也会保存，用于标记该股票确实没有板块信息）
         """
-        try:
-            if os.path.exists(self.sectors_cache):
-                df = pd.read_excel(self.sectors_cache, engine='openpyxl')
-                df = df[df['code'] != stock_code]
-            else:
-                df = pd.DataFrame()
-            
-            new_row = pd.DataFrame([{
-                'code': stock_code,
-                'sectors': ','.join(sectors),
-                'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }])
-            df = pd.concat([df, new_row], ignore_index=True)
-            
-            df.to_excel(self.sectors_cache, index=False, engine='openpyxl')
-        except Exception as e:
-            print(f"保存板块缓存失败: {e}")
+        # 使用文件锁防止并发写入
+        with self._file_locks['sectors']:
+            try:
+                df = None
+                if os.path.exists(self.sectors_cache):
+                    # 检查文件是否损坏
+                    if not self._is_excel_file_valid(self.sectors_cache):
+                        # 文件损坏，尝试修复
+                        self._repair_corrupted_cache(self.sectors_cache, 'sectors')
+                        # 如果修复失败，创建新文件
+                        if not os.path.exists(self.sectors_cache) or not self._is_excel_file_valid(self.sectors_cache):
+                            df = pd.DataFrame()
+                        else:
+                            try:
+                                df = pd.read_excel(self.sectors_cache, engine='openpyxl')
+                            except:
+                                df = pd.DataFrame()
+                    else:
+                        # 文件有效，正常读取
+                        try:
+                            df = pd.read_excel(self.sectors_cache, engine='openpyxl')
+                        except Exception as e:
+                            # 读取失败，可能是文件损坏，尝试修复
+                            print(f"读取板块缓存失败，尝试修复: {e}")
+                            self._repair_corrupted_cache(self.sectors_cache, 'sectors')
+                            if os.path.exists(self.sectors_cache) and self._is_excel_file_valid(self.sectors_cache):
+                                try:
+                                    df = pd.read_excel(self.sectors_cache, engine='openpyxl')
+                                except:
+                                    df = pd.DataFrame()
+                            else:
+                                df = pd.DataFrame()
+                    
+                    if df is not None and not df.empty:
+                        # 确保code列是字符串格式
+                        if 'code' in df.columns:
+                            df['code'] = df['code'].astype(str).str.zfill(6)
+                        # 移除要更新的股票旧数据
+                        df = df[df['code'] != stock_code]
+                else:
+                    df = pd.DataFrame()
+                
+                new_row = pd.DataFrame([{
+                    'code': str(stock_code).zfill(6),
+                    'sectors': ','.join(sectors) if sectors else '',  # 空列表保存为空字符串
+                    'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }])
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # 确保目录存在
+                os.makedirs(os.path.dirname(self.sectors_cache), exist_ok=True)
+                
+                # 写入临时文件，然后重命名（原子操作）
+                temp_file = self.sectors_cache.replace('.xlsx', '_temp.xlsx')
+                df.to_excel(temp_file, index=False, engine='openpyxl')
+                
+                # 删除旧文件并重命名临时文件
+                if os.path.exists(self.sectors_cache):
+                    try:
+                        os.remove(self.sectors_cache)
+                    except:
+                        pass
+                os.rename(temp_file, self.sectors_cache)
+                
+            except Exception as e:
+                print(f"保存板块缓存失败: {e}")
+                import traceback
+                traceback.print_exc()
+                # 如果保存失败，尝试删除损坏的文件
+                if os.path.exists(self.sectors_cache):
+                    try:
+                        if not self._is_excel_file_valid(self.sectors_cache):
+                            backup_file = self.sectors_cache.replace('.xlsx', '_backup.xlsx')
+                            try:
+                                os.rename(self.sectors_cache, backup_file)
+                            except:
+                                pass
+                    except:
+                        pass
     
-    def get_stock_concepts(self, stock_code: str, force_refresh: bool = False) -> List[str]:
+    def get_stock_concepts(self, stock_code: str, force_refresh: bool = False) -> Optional[List[str]]:
         """
         从缓存获取股票概念
         Args:
             stock_code: 股票代码
             force_refresh: 是否强制刷新
         Returns:
-            概念列表
+            概念列表，如果缓存中没有数据返回None，如果缓存中保存了空列表返回[]
         """
         if not force_refresh and self._is_cache_valid(self.concepts_cache, 'concepts'):
             try:
+                # 检查文件是否损坏
+                if not self._is_excel_file_valid(self.concepts_cache):
+                    # 文件损坏，尝试修复
+                    self._repair_corrupted_cache(self.concepts_cache, 'concepts')
+                    # 如果修复失败，返回None
+                    if not os.path.exists(self.concepts_cache) or not self._is_excel_file_valid(self.concepts_cache):
+                        return None
+                
                 df = pd.read_excel(self.concepts_cache, engine='openpyxl')
+                # 确保code列是字符串格式
+                if 'code' in df.columns:
+                    df['code'] = df['code'].astype(str).str.zfill(6)
                 stock_data = df[df['code'] == stock_code]
                 if not stock_data.empty:
                     concepts_str = stock_data.iloc[0].get('concepts', '')
+                    # 如果concepts字段存在但为空字符串，说明之前保存了空列表
+                    if concepts_str == '':
+                        # 检查缓存时间，如果超过3天，返回None让fetcher重新获取
+                        update_time_str = stock_data.iloc[0].get('update_time', '')
+                        if update_time_str:
+                            try:
+                                update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
+                                days_old = (datetime.now() - update_time).days
+                                if days_old > 3:  # 空列表缓存超过3天，重新获取
+                                    return None
+                            except:
+                                pass
+                        return []
+                    # 如果concepts字段有值，返回解析后的列表
                     return concepts_str.split(',') if concepts_str else []
             except Exception as e:
                 print(f"读取概念缓存失败: {e}")
-        return []
+        # 缓存中没有数据，返回None
+        return None
     
     def save_stock_concepts(self, stock_code: str, concepts: List[str]):
         """
         保存股票概念到缓存
         Args:
             stock_code: 股票代码
-            concepts: 概念列表
+            concepts: 概念列表（空列表也会保存，用于标记该股票确实没有概念信息）
         """
-        try:
-            if os.path.exists(self.concepts_cache):
-                df = pd.read_excel(self.concepts_cache, engine='openpyxl')
-                df = df[df['code'] != stock_code]
-            else:
-                df = pd.DataFrame()
-            
-            new_row = pd.DataFrame([{
-                'code': stock_code,
-                'concepts': ','.join(concepts),
-                'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }])
-            df = pd.concat([df, new_row], ignore_index=True)
-            
-            df.to_excel(self.concepts_cache, index=False, engine='openpyxl')
-        except Exception as e:
-            print(f"保存概念缓存失败: {e}")
+        # 使用文件锁防止并发写入
+        with self._file_locks['concepts']:
+            try:
+                df = None
+                if os.path.exists(self.concepts_cache):
+                    # 检查文件是否损坏
+                    if not self._is_excel_file_valid(self.concepts_cache):
+                        # 文件损坏，尝试修复
+                        self._repair_corrupted_cache(self.concepts_cache, 'concepts')
+                        # 如果修复失败，创建新文件
+                        if not os.path.exists(self.concepts_cache) or not self._is_excel_file_valid(self.concepts_cache):
+                            df = pd.DataFrame()
+                        else:
+                            try:
+                                df = pd.read_excel(self.concepts_cache, engine='openpyxl')
+                            except:
+                                df = pd.DataFrame()
+                    else:
+                        # 文件有效，正常读取
+                        try:
+                            df = pd.read_excel(self.concepts_cache, engine='openpyxl')
+                        except Exception as e:
+                            # 读取失败，可能是文件损坏，尝试修复
+                            print(f"读取概念缓存失败，尝试修复: {e}")
+                            self._repair_corrupted_cache(self.concepts_cache, 'concepts')
+                            if os.path.exists(self.concepts_cache) and self._is_excel_file_valid(self.concepts_cache):
+                                try:
+                                    df = pd.read_excel(self.concepts_cache, engine='openpyxl')
+                                except:
+                                    df = pd.DataFrame()
+                            else:
+                                df = pd.DataFrame()
+                    
+                    if df is not None and not df.empty:
+                        # 确保code列是字符串格式
+                        if 'code' in df.columns:
+                            df['code'] = df['code'].astype(str).str.zfill(6)
+                        # 移除要更新的股票旧数据
+                        df = df[df['code'] != stock_code]
+                else:
+                    df = pd.DataFrame()
+                
+                new_row = pd.DataFrame([{
+                    'code': str(stock_code).zfill(6),
+                    'concepts': ','.join(concepts) if concepts else '',  # 空列表保存为空字符串
+                    'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }])
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # 确保目录存在
+                os.makedirs(os.path.dirname(self.concepts_cache), exist_ok=True)
+                
+                # 写入临时文件，然后重命名（原子操作）
+                temp_file = self.concepts_cache.replace('.xlsx', '_temp.xlsx')
+                df.to_excel(temp_file, index=False, engine='openpyxl')
+                
+                # 删除旧文件并重命名临时文件
+                if os.path.exists(self.concepts_cache):
+                    try:
+                        os.remove(self.concepts_cache)
+                    except:
+                        pass
+                os.rename(temp_file, self.concepts_cache)
+                
+            except Exception as e:
+                print(f"保存概念缓存失败: {e}")
+                import traceback
+                traceback.print_exc()
+                # 如果保存失败，尝试删除损坏的文件
+                if os.path.exists(self.concepts_cache):
+                    try:
+                        if not self._is_excel_file_valid(self.concepts_cache):
+                            backup_file = self.concepts_cache.replace('.xlsx', '_backup.xlsx')
+                            try:
+                                os.rename(self.concepts_cache, backup_file)
+                            except:
+                                pass
+                    except:
+                        pass
     
     def get_stock_list(self, force_refresh: bool = False) -> Optional[pd.DataFrame]:
         """

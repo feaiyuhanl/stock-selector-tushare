@@ -720,6 +720,8 @@ class DataFetcher:
         
         # 先尝试从缓存读取
         cached_sectors = self.cache_manager.get_stock_sectors(clean_code, force_refresh)
+        # 如果缓存中有数据（包括空列表），直接返回
+        # None表示缓存中没有该股票的数据，需要重新获取
         if cached_sectors is not None:
             return cached_sectors
         
@@ -761,6 +763,8 @@ class DataFetcher:
         
         # 先尝试从缓存读取
         cached_concepts = self.cache_manager.get_stock_concepts(clean_code, force_refresh)
+        # 如果缓存中有数据（包括空列表），直接返回
+        # None表示缓存中没有该股票的数据，需要重新获取
         if cached_concepts is not None:
             return cached_concepts
         
@@ -832,9 +836,12 @@ class DataFetcher:
                 matched_index = None
                 sector_name_clean = sector_name.strip()
                 
-                # 精确匹配：板块名称完全匹配或包含在指数名称中
+                # 精确匹配：板块名称完全匹配或包含在指数名称中（排除退市指数）
                 for _, row in index_df.iterrows():
                     index_name = row['name']
+                    # 跳过退市指数
+                    if '退市' in index_name:
+                        continue
                     if sector_name_clean in index_name or index_name in sector_name_clean:
                         matched_index = row['ts_code']
                         break
@@ -846,15 +853,21 @@ class DataFetcher:
                     if len(keywords) >= 2:
                         for _, row in index_df.iterrows():
                             index_name = row['name']
+                            # 跳过退市指数
+                            if '退市' in index_name:
+                                continue
                             # 检查关键词是否在指数名称中
                             if keywords in index_name or any(kw in index_name for kw in [keywords[:2], keywords[:3]] if len(kw) >= 2):
                                 matched_index = row['ts_code']
                                 break
                 
-                # 如果还是没找到，尝试使用行业名称的前几个字符匹配
+                # 如果还是没找到，尝试使用行业名称的前几个字符匹配（排除退市指数）
                 if matched_index is None and len(sector_name_clean) >= 2:
                     for _, row in index_df.iterrows():
                         index_name = row['name']
+                        # 跳过退市指数
+                        if '退市' in index_name:
+                            continue
                         if sector_name_clean[:2] in index_name or sector_name_clean[:3] in index_name:
                             matched_index = row['ts_code']
                             break
