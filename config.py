@@ -50,6 +50,9 @@ TOP_N = 20
 # 数据获取参数
 LOOKBACK_DAYS = 60  # 回看天数
 
+# K线数据缓存配置
+KLINE_CACHE_RETENTION_DAYS = 250  # K线数据保留天数（约1年，250个交易日）
+
 # 板块类型配置
 BOARD_TYPES = {
     'main': '主板',      # 默认只选主板

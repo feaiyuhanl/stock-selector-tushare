@@ -4,9 +4,13 @@
 import pandas as pd
 import os
 import glob
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import config
+from openpyxl import load_workbook
+from openpyxl.styles import NamedStyle
 
 
 class CacheManager:
@@ -50,9 +54,20 @@ class CacheManager:
         self.concepts_cache_dir = self.data_dirs['concepts']
         
         # 确保所有缓存目录存在
-        for cache_dir_path in list(self.data_dirs.values()) + [self.meta_dir]:
+        # 注意：fundamental 和 financial 目录不再自动创建（已迁移到 meta 目录下的集中文件）
+        # 只在需要时（修复损坏文件或读取旧数据）才创建
+        required_dirs = [
+            self.data_dirs['kline'],
+            self.data_dirs['sectors'],
+            self.data_dirs['concepts'],
+            self.meta_dir
+        ]
+        for cache_dir_path in required_dirs:
             if not os.path.exists(cache_dir_path):
                 os.makedirs(cache_dir_path)
+        
+        # 清理可能存在的临时文件
+        self._cleanup_temp_files()
         
         # 缓存有效期（天数）
         # 低频数据（财务、板块、概念）默认不刷新，只在首次加载时获取
@@ -67,11 +82,36 @@ class CacheManager:
         
         # 定义哪些数据类型是低频的（默认不刷新）
         self.low_frequency_types = ['financial', 'sectors', 'concepts']
+        
+        # 文件级别的锁，防止并发写入导致文件句柄泄露（Windows上特别重要）
+        self._file_locks = {
+            'fundamental': threading.Lock(),
+            'financial': threading.Lock(),
+            'sectors': threading.Lock(),
+            'concepts': threading.Lock(),
+            'stock_list': threading.Lock(),
+        }
     
     def _ensure_cache_dir(self):
         """确保缓存目录存在"""
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
+    
+    def _cleanup_temp_files(self):
+        """清理可能存在的临时文件（程序异常退出时可能留下）"""
+        try:
+            # 清理meta目录下的临时文件
+            if os.path.exists(self.meta_dir):
+                for filename in os.listdir(self.meta_dir):
+                    # 清理旧的.tmp文件和新的_temp.xlsx临时文件
+                    if filename.endswith('.tmp') or filename.endswith('_temp.xlsx'):
+                        temp_file = os.path.join(self.meta_dir, filename)
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+        except:
+            pass
     
     def _is_cache_valid(self, cache_file: str, cache_type: str) -> bool:
         """
@@ -94,6 +134,80 @@ class CacheManager:
             return mtime.date() == datetime.now().date()
         
         return (datetime.now() - mtime).days < valid_days
+    
+    def _is_excel_file_valid(self, file_path: str) -> bool:
+        """
+        检查Excel文件是否有效（未损坏）
+        Args:
+            file_path: Excel文件路径
+        Returns:
+            文件是否有效
+        """
+        if not os.path.exists(file_path):
+            return False
+        
+        try:
+            # 尝试读取文件，检查是否损坏
+            df = pd.read_excel(file_path, engine='openpyxl', nrows=1)
+            return True
+        except Exception as e:
+            # 文件损坏，返回False
+            return False
+    
+    def _repair_corrupted_cache(self, cache_file: str, cache_type: str = 'fundamental'):
+        """
+        修复损坏的缓存文件
+        Args:
+            cache_file: 缓存文件路径
+            cache_type: 缓存类型
+        """
+        try:
+            # 尝试从独立文件恢复数据
+            if cache_type == 'fundamental':
+                cache_dir = self.fundamental_cache_dir
+            elif cache_type == 'financial':
+                cache_dir = self.financial_cache_dir
+            else:
+                return
+            
+            # 收集所有独立文件的数据
+            recovered_data = []
+            if os.path.exists(cache_dir):
+                for filename in os.listdir(cache_dir):
+                    if filename.endswith('.xlsx'):
+                        file_path = os.path.join(cache_dir, filename)
+                        try:
+                            df = pd.read_excel(file_path, engine='openpyxl')
+                            if not df.empty:
+                                recovered_data.append(df)
+                        except:
+                            # 跳过损坏的独立文件
+                            continue
+            
+            # 如果找到恢复的数据，重建集中文件
+            if recovered_data:
+                combined_df = pd.concat(recovered_data, ignore_index=True)
+                # 去重
+                if 'code' in combined_df.columns:
+                    combined_df = combined_df.drop_duplicates(subset=['code'], keep='last')
+                # 保存到集中文件
+                combined_df.to_excel(cache_file, index=False, engine='openpyxl')
+                print(f"已修复损坏的{cache_type}缓存文件，从独立文件恢复了{len(combined_df)}条数据")
+            else:
+                # 没有可恢复的数据，删除损坏文件
+                try:
+                    os.remove(cache_file)
+                    print(f"已删除损坏的{cache_type}缓存文件（无数据可恢复）")
+                except:
+                    pass
+        except Exception as e:
+            # 修复失败，删除损坏文件
+            try:
+                if os.path.exists(cache_file):
+                    os.remove(cache_file)
+                    print(f"修复失败，已删除损坏的{cache_type}缓存文件: {e}")
+            except:
+                pass
     
     def _is_data_valid(self, data: Dict, data_type: str) -> bool:
         """
@@ -126,7 +240,7 @@ class CacheManager:
     
     def get_fundamental(self, stock_code: str, force_refresh: bool = False) -> Optional[Dict]:
         """
-        从缓存获取基本面数据（优先从独立文件读取，支持断点续传）
+        从缓存获取基本面数据（优先从集中文件读取，兼容独立文件）
         Args:
             stock_code: 股票代码
             force_refresh: 是否强制刷新
@@ -136,7 +250,56 @@ class CacheManager:
         if force_refresh:
             return None
         
-        # 方式1：优先从独立文件读取（支持断点续传）
+        # 确保代码格式化为6位字符串
+        stock_code = str(stock_code).zfill(6)
+        
+        # 方式1：优先从集中文件读取（主要方式）
+        if self._is_cache_valid(self.fundamental_cache, 'fundamental'):
+            # 先检查文件是否损坏
+            if not self._is_excel_file_valid(self.fundamental_cache):
+                # 文件损坏，尝试修复
+                self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
+                # 修复后如果文件仍不存在，跳过
+                if not os.path.exists(self.fundamental_cache):
+                    pass
+                else:
+                    # 修复后再次尝试读取
+                    try:
+                        df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
+                        # 确保code列是字符串格式
+                        if 'code' in df.columns:
+                            df['code'] = df['code'].astype(str).str.zfill(6)
+                        stock_data = df[df['code'] == stock_code]
+                        if not stock_data.empty:
+                            data = stock_data.iloc[0].to_dict()
+                            # 验证数据有效性
+                            if self._is_data_valid(data, 'fundamental'):
+                                return data
+                    except Exception as e:
+                        # 修复后仍然失败，删除文件
+                        try:
+                            os.remove(self.fundamental_cache)
+                        except:
+                            pass
+            else:
+                # 文件有效，正常读取
+                try:
+                    df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
+                    # 确保code列是字符串格式
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    stock_data = df[df['code'] == stock_code]
+                    if not stock_data.empty:
+                        data = stock_data.iloc[0].to_dict()
+                        # 验证数据有效性
+                        if self._is_data_valid(data, 'fundamental'):
+                            return data
+                except Exception as e:
+                    # 读取失败，可能是文件损坏，尝试修复
+                    print(f"读取基本面集中缓存失败: {e}")
+                    self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
+        
+        # 方式2：从独立文件读取（兼容旧数据，逐步迁移到集中文件）
         cache_file = os.path.join(self.fundamental_cache_dir, f"{stock_code}.xlsx")
         if os.path.exists(cache_file) and self._is_cache_valid(cache_file, 'fundamental'):
             try:
@@ -145,9 +308,14 @@ class CacheManager:
                     data = df.iloc[0].to_dict()
                     # 验证数据有效性
                     if self._is_data_valid(data, 'fundamental'):
+                        # 迁移到集中文件
+                        try:
+                            self.save_fundamental(stock_code, data)
+                        except:
+                            pass
                         return data
                     else:
-                        # 数据无效，删除缓存文件，强制重新获取
+                        # 数据无效，删除缓存文件
                         try:
                             os.remove(cache_file)
                         except:
@@ -155,99 +323,183 @@ class CacheManager:
             except Exception as e:
                 print(f"读取基本面独立缓存失败 ({stock_code}): {e}")
         
-        # 方式2：从集中文件读取（兼容旧数据）
-        if self._is_cache_valid(self.fundamental_cache, 'fundamental'):
-            try:
-                df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                stock_data = df[df['code'] == stock_code]
-                if not stock_data.empty:
-                    data = stock_data.iloc[0].to_dict()
-                    # 验证数据有效性
-                    if self._is_data_valid(data, 'fundamental'):
-                        return data
-            except Exception as e:
-                print(f"读取基本面集中缓存失败: {e}")
-        
         return None
     
     def save_fundamental(self, stock_code: str, data: Dict):
         """
-        保存基本面数据到缓存（支持独立文件存储，便于断点续传）
+        保存基本面数据到缓存（优化策略：只有一行数据的合并到集中文件，多行数据才用独立文件）
         Args:
             stock_code: 股票代码
             data: 基本面数据
         """
-        try:
-            # 验证数据有效性
-            if not self._is_data_valid(data, 'fundamental'):
-                return  # 无效数据不保存
-            
-            # 保存为独立文件（支持断点续传）
-            cache_file = os.path.join(self.fundamental_cache_dir, f"{stock_code}.xlsx")
-            data_to_save = data.copy()
-            data_to_save['code'] = stock_code
-            data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            pd.DataFrame([data_to_save]).to_excel(cache_file, index=False, engine='openpyxl')
-            
-            # 同时保存到集中文件（用于快速批量查询）
-            if os.path.exists(self.fundamental_cache):
-                df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                df = df[df['code'] != stock_code]
-            else:
-                df = pd.DataFrame()
-            
-            new_row = pd.DataFrame([data_to_save])
-            df = pd.concat([df, new_row], ignore_index=True)
-            df.to_excel(self.fundamental_cache, index=False, engine='openpyxl')
-        except Exception as e:
-            print(f"保存基本面缓存失败: {e}")
+        # 使用文件锁防止并发写入
+        with self._file_locks['fundamental']:
+            try:
+                # 验证数据有效性
+                if not self._is_data_valid(data, 'fundamental'):
+                    return  # 无效数据不保存
+                
+                data_to_save = data.copy()
+                data_to_save['code'] = stock_code
+                data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 基本面数据只有一行，直接保存到集中文件（不创建独立文件）
+                # 先检查文件是否损坏
+                if os.path.exists(self.fundamental_cache):
+                    if not self._is_excel_file_valid(self.fundamental_cache):
+                        # 文件损坏，尝试修复
+                        self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
+                        # 如果修复失败，创建新文件
+                        if not os.path.exists(self.fundamental_cache) or not self._is_excel_file_valid(self.fundamental_cache):
+                            df = pd.DataFrame()
+                        else:
+                            df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
+                    else:
+                        df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
+                    # 确保code列是字符串格式
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    # 移除旧数据
+                    df = df[df['code'] != stock_code]
+                else:
+                    df = pd.DataFrame()
+                
+                new_row = pd.DataFrame([data_to_save])
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # 使用临时文件写入，避免写入过程中文件损坏
+                # 使用.xlsx扩展名，pandas才能正确识别文件类型
+                temp_file = self.fundamental_cache.replace('.xlsx', '_temp.xlsx')
+                try:
+                    # 写入临时文件
+                    df.to_excel(temp_file, index=False, engine='openpyxl')
+                    # 确保写入完成，文件句柄关闭
+                    del df
+                    time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
+                    
+                    # 删除原文件（带重试机制）
+                    max_retries = 5
+                    for attempt in range(max_retries):
+                        try:
+                            if os.path.exists(self.fundamental_cache):
+                                os.remove(self.fundamental_cache)
+                            break
+                        except PermissionError:
+                            if attempt < max_retries - 1:
+                                time.sleep(0.2)  # 等待文件句柄释放
+                            else:
+                                raise
+                    
+                    # 重命名临时文件
+                    os.rename(temp_file, self.fundamental_cache)
+                except Exception as e:
+                    # 如果写入失败，删除临时文件
+                    if os.path.exists(temp_file):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    raise e
+                
+                # 如果存在旧的独立文件，删除它（因为现在只使用集中文件）
+                cache_file = os.path.join(self.fundamental_cache_dir, f"{stock_code}.xlsx")
+                if os.path.exists(cache_file):
+                    try:
+                        os.remove(cache_file)
+                    except:
+                        pass
+            except Exception as e:
+                print(f"保存基本面缓存失败: {e}")
     
     def batch_save_fundamental(self, data_dict: Dict[str, Dict]):
         """
-        批量保存基本面数据（提高效率，减少IO操作）
+        批量保存基本面数据（提高效率，减少IO操作，只保存到集中文件）
         Args:
             data_dict: {stock_code: data_dict} 字典
         """
         if not data_dict:
             return
         
-        try:
-            # 读取现有集中文件
-            if os.path.exists(self.fundamental_cache):
-                df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                # 移除要更新的股票旧数据
-                existing_codes = set(data_dict.keys())
-                df = df[~df['code'].isin(existing_codes)]
-            else:
-                df = pd.DataFrame()
-            
-            # 准备新数据
-            new_rows = []
-            for stock_code, data in data_dict.items():
-                # 验证数据有效性
-                if not self._is_data_valid(data, 'fundamental'):
-                    continue
+        # 使用文件锁防止并发写入
+        with self._file_locks['fundamental']:
+            try:
+                # 读取现有集中文件
+                df = None
+                if os.path.exists(self.fundamental_cache):
+                    # 检查文件是否损坏
+                    if not self._is_excel_file_valid(self.fundamental_cache):
+                        # 文件损坏，尝试修复
+                        self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
+                        # 如果修复失败，创建新文件
+                        if not os.path.exists(self.fundamental_cache) or not self._is_excel_file_valid(self.fundamental_cache):
+                            df = pd.DataFrame()
+                        else:
+                            df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
+                    else:
+                        df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
+                    # 确保code列是字符串格式
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    # 移除要更新的股票旧数据
+                    existing_codes = set(str(code).zfill(6) for code in data_dict.keys())
+                    df = df[~df['code'].isin(existing_codes)]
+                else:
+                    df = pd.DataFrame()
                 
-                # 保存独立文件
-                cache_file = os.path.join(self.fundamental_cache_dir, f"{stock_code}.xlsx")
-                data_to_save = data.copy()
-                data_to_save['code'] = stock_code
-                data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                pd.DataFrame([data_to_save]).to_excel(cache_file, index=False, engine='openpyxl')
+                # 准备新数据（只保存到集中文件，不创建独立文件）
+                new_rows = []
+                for stock_code, data in data_dict.items():
+                    # 验证数据有效性
+                    if not self._is_data_valid(data, 'fundamental'):
+                        continue
+                    
+                    data_to_save = data.copy()
+                    data_to_save['code'] = str(stock_code).zfill(6)
+                    data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    new_rows.append(data_to_save)
                 
-                new_rows.append(data_to_save)
-            
-            # 批量更新集中文件
-            if new_rows:
-                new_df = pd.DataFrame(new_rows)
-                df = pd.concat([df, new_df], ignore_index=True)
-                df.to_excel(self.fundamental_cache, index=False, engine='openpyxl')
-        except Exception as e:
-            print(f"批量保存基本面缓存失败: {e}")
+                # 批量更新集中文件（使用临时文件，避免写入过程中文件损坏）
+                if new_rows:
+                    new_df = pd.DataFrame(new_rows)
+                    df = pd.concat([df, new_df], ignore_index=True)
+                    # 使用.xlsx扩展名，pandas才能正确识别文件类型
+                    temp_file = self.fundamental_cache.replace('.xlsx', '_temp.xlsx')
+                    try:
+                        # 写入临时文件
+                        df.to_excel(temp_file, index=False, engine='openpyxl')
+                        # 确保写入完成，文件句柄关闭
+                        del df
+                        time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
+                        
+                        # 删除原文件（带重试机制）
+                        max_retries = 5
+                        for attempt in range(max_retries):
+                            try:
+                                if os.path.exists(self.fundamental_cache):
+                                    os.remove(self.fundamental_cache)
+                                break
+                            except PermissionError:
+                                if attempt < max_retries - 1:
+                                    time.sleep(0.2)  # 等待文件句柄释放
+                                else:
+                                    raise
+                        
+                        # 重命名临时文件
+                        os.rename(temp_file, self.fundamental_cache)
+                    except Exception as e:
+                        # 如果写入失败，删除临时文件
+                        if os.path.exists(temp_file):
+                            try:
+                                os.remove(temp_file)
+                            except:
+                                pass
+                        raise e
+            except Exception as e:
+                print(f"批量保存基本面缓存失败: {e}")
     
     def get_financial(self, stock_code: str, force_refresh: bool = False) -> Optional[Dict]:
         """
-        从缓存获取财务数据（优先从独立文件读取，支持断点续传）
+        从缓存获取财务数据（优先从集中文件读取，兼容独立文件）
         Args:
             stock_code: 股票代码
             force_refresh: 是否强制刷新
@@ -257,7 +509,56 @@ class CacheManager:
         if force_refresh:
             return None
         
-        # 优先从独立文件读取（支持断点续传）
+        # 确保代码格式化为6位字符串
+        stock_code = str(stock_code).zfill(6)
+        
+        # 方式1：优先从集中文件读取（主要方式）
+        if self._is_cache_valid(self.financial_cache, 'financial'):
+            # 先检查文件是否损坏
+            if not self._is_excel_file_valid(self.financial_cache):
+                # 文件损坏，尝试修复
+                self._repair_corrupted_cache(self.financial_cache, 'financial')
+                # 修复后如果文件仍不存在，跳过
+                if not os.path.exists(self.financial_cache):
+                    pass
+                else:
+                    # 修复后再次尝试读取
+                    try:
+                        df = pd.read_excel(self.financial_cache, engine='openpyxl')
+                        # 确保code列是字符串格式
+                        if 'code' in df.columns:
+                            df['code'] = df['code'].astype(str).str.zfill(6)
+                        stock_data = df[df['code'] == stock_code]
+                        if not stock_data.empty:
+                            data = stock_data.iloc[0].to_dict()
+                            # 验证数据有效性
+                            if self._is_data_valid(data, 'financial'):
+                                return data
+                    except Exception as e:
+                        # 修复后仍然失败，删除文件
+                        try:
+                            os.remove(self.financial_cache)
+                        except:
+                            pass
+            else:
+                # 文件有效，正常读取
+                try:
+                    df = pd.read_excel(self.financial_cache, engine='openpyxl')
+                    # 确保code列是字符串格式
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    stock_data = df[df['code'] == stock_code]
+                    if not stock_data.empty:
+                        data = stock_data.iloc[0].to_dict()
+                        # 验证数据有效性
+                        if self._is_data_valid(data, 'financial'):
+                            return data
+                except Exception as e:
+                    # 读取失败，可能是文件损坏，尝试修复
+                    print(f"读取财务集中缓存失败: {e}")
+                    self._repair_corrupted_cache(self.financial_cache, 'financial')
+        
+        # 方式2：从独立文件读取（兼容旧数据，逐步迁移到集中文件）
         cache_file = os.path.join(self.financial_cache_dir, f"{stock_code}.xlsx")
         if os.path.exists(cache_file) and self._is_cache_valid(cache_file, 'financial'):
             try:
@@ -266,9 +567,14 @@ class CacheManager:
                     data = df.iloc[0].to_dict()
                     # 验证数据有效性
                     if self._is_data_valid(data, 'financial'):
+                        # 迁移到集中文件
+                        try:
+                            self.save_financial(stock_code, data)
+                        except:
+                            pass
                         return data
                     else:
-                        # 数据无效，删除缓存文件，强制重新获取
+                        # 数据无效，删除缓存文件
                         try:
                             os.remove(cache_file)
                         except:
@@ -276,95 +582,179 @@ class CacheManager:
             except Exception as e:
                 print(f"读取财务独立缓存失败 ({stock_code}): {e}")
         
-        # 从集中文件读取（用于快速批量查询）
-        if self._is_cache_valid(self.financial_cache, 'financial'):
-            try:
-                df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                stock_data = df[df['code'] == stock_code]
-                if not stock_data.empty:
-                    data = stock_data.iloc[0].to_dict()
-                    # 验证数据有效性
-                    if self._is_data_valid(data, 'financial'):
-                        return data
-            except Exception as e:
-                print(f"读取财务集中缓存失败: {e}")
-        
         return None
     
     def save_financial(self, stock_code: str, data: Dict):
         """
-        保存财务数据到缓存（支持独立文件存储，便于断点续传）
+        保存财务数据到缓存（优化策略：只有一行数据的合并到集中文件，多行数据才用独立文件）
         Args:
             stock_code: 股票代码
             data: 财务数据
         """
-        try:
-            # 验证数据有效性
-            if not self._is_data_valid(data, 'financial'):
-                return  # 无效数据不保存
-            
-            # 保存为独立文件（支持断点续传）
-            cache_file = os.path.join(self.financial_cache_dir, f"{stock_code}.xlsx")
-            data_to_save = data.copy()
-            data_to_save['code'] = stock_code
-            data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            pd.DataFrame([data_to_save]).to_excel(cache_file, index=False, engine='openpyxl')
-            
-            # 同时保存到集中文件（用于快速批量查询）
-            if os.path.exists(self.financial_cache):
-                df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                df = df[df['code'] != stock_code]
-            else:
-                df = pd.DataFrame()
-            
-            new_row = pd.DataFrame([data_to_save])
-            df = pd.concat([df, new_row], ignore_index=True)
-            df.to_excel(self.financial_cache, index=False, engine='openpyxl')
-        except Exception as e:
-            print(f"保存财务缓存失败: {e}")
+        # 使用文件锁防止并发写入
+        with self._file_locks['financial']:
+            try:
+                # 验证数据有效性
+                if not self._is_data_valid(data, 'financial'):
+                    return  # 无效数据不保存
+                
+                data_to_save = data.copy()
+                data_to_save['code'] = stock_code
+                data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 财务数据只有一行，直接保存到集中文件（不创建独立文件）
+                # 先检查文件是否损坏
+                if os.path.exists(self.financial_cache):
+                    if not self._is_excel_file_valid(self.financial_cache):
+                        # 文件损坏，尝试修复
+                        self._repair_corrupted_cache(self.financial_cache, 'financial')
+                        # 如果修复失败，创建新文件
+                        if not os.path.exists(self.financial_cache) or not self._is_excel_file_valid(self.financial_cache):
+                            df = pd.DataFrame()
+                        else:
+                            df = pd.read_excel(self.financial_cache, engine='openpyxl')
+                    else:
+                        df = pd.read_excel(self.financial_cache, engine='openpyxl')
+                    # 确保code列是字符串格式
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    # 移除旧数据
+                    df = df[df['code'] != stock_code]
+                else:
+                    df = pd.DataFrame()
+                
+                new_row = pd.DataFrame([data_to_save])
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # 使用临时文件写入，避免写入过程中文件损坏
+                # 使用.xlsx扩展名，pandas才能正确识别文件类型
+                temp_file = self.financial_cache.replace('.xlsx', '_temp.xlsx')
+                try:
+                    # 写入临时文件
+                    df.to_excel(temp_file, index=False, engine='openpyxl')
+                    # 确保写入完成，文件句柄关闭
+                    del df
+                    time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
+                    
+                    # 删除原文件（带重试机制）
+                    max_retries = 5
+                    for attempt in range(max_retries):
+                        try:
+                            if os.path.exists(self.financial_cache):
+                                os.remove(self.financial_cache)
+                            break
+                        except PermissionError:
+                            if attempt < max_retries - 1:
+                                time.sleep(0.2)  # 等待文件句柄释放
+                            else:
+                                raise
+                    
+                    # 重命名临时文件
+                    os.rename(temp_file, self.financial_cache)
+                except Exception as e:
+                    # 如果写入失败，删除临时文件
+                    if os.path.exists(temp_file):
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    raise e
+                
+                # 如果存在旧的独立文件，删除它（因为现在只使用集中文件）
+                cache_file = os.path.join(self.financial_cache_dir, f"{stock_code}.xlsx")
+                if os.path.exists(cache_file):
+                    try:
+                        os.remove(cache_file)
+                    except:
+                        pass
+            except Exception as e:
+                print(f"保存财务缓存失败: {e}")
     
     def batch_save_financial(self, data_dict: Dict[str, Dict]):
         """
-        批量保存财务数据（提高效率，减少IO操作）
+        批量保存财务数据（提高效率，减少IO操作，只保存到集中文件）
         Args:
             data_dict: {stock_code: data_dict} 字典
         """
         if not data_dict:
             return
         
-        try:
-            # 读取现有集中文件
-            if os.path.exists(self.financial_cache):
-                df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                # 移除要更新的股票旧数据
-                existing_codes = set(data_dict.keys())
-                df = df[~df['code'].isin(existing_codes)]
-            else:
-                df = pd.DataFrame()
-            
-            # 准备新数据
-            new_rows = []
-            for stock_code, data in data_dict.items():
-                # 验证数据有效性
-                if not self._is_data_valid(data, 'financial'):
-                    continue
+        # 使用文件锁防止并发写入
+        with self._file_locks['financial']:
+            try:
+                # 读取现有集中文件
+                df = None
+                if os.path.exists(self.financial_cache):
+                    # 检查文件是否损坏
+                    if not self._is_excel_file_valid(self.financial_cache):
+                        # 文件损坏，尝试修复
+                        self._repair_corrupted_cache(self.financial_cache, 'financial')
+                        # 如果修复失败，创建新文件
+                        if not os.path.exists(self.financial_cache) or not self._is_excel_file_valid(self.financial_cache):
+                            df = pd.DataFrame()
+                        else:
+                            df = pd.read_excel(self.financial_cache, engine='openpyxl')
+                    else:
+                        df = pd.read_excel(self.financial_cache, engine='openpyxl')
+                    # 确保code列是字符串格式
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    # 移除要更新的股票旧数据
+                    existing_codes = set(str(code).zfill(6) for code in data_dict.keys())
+                    df = df[~df['code'].isin(existing_codes)]
+                else:
+                    df = pd.DataFrame()
                 
-                # 保存独立文件
-                cache_file = os.path.join(self.financial_cache_dir, f"{stock_code}.xlsx")
-                data_to_save = data.copy()
-                data_to_save['code'] = stock_code
-                data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                pd.DataFrame([data_to_save]).to_excel(cache_file, index=False, engine='openpyxl')
+                # 准备新数据（只保存到集中文件，不创建独立文件）
+                new_rows = []
+                for stock_code, data in data_dict.items():
+                    # 验证数据有效性
+                    if not self._is_data_valid(data, 'financial'):
+                        continue
+                    
+                    data_to_save = data.copy()
+                    data_to_save['code'] = str(stock_code).zfill(6)
+                    data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    new_rows.append(data_to_save)
                 
-                new_rows.append(data_to_save)
-            
-            # 批量更新集中文件
-            if new_rows:
-                new_df = pd.DataFrame(new_rows)
-                df = pd.concat([df, new_df], ignore_index=True)
-                df.to_excel(self.financial_cache, index=False, engine='openpyxl')
-        except Exception as e:
-            print(f"批量保存财务缓存失败: {e}")
+                # 批量更新集中文件（使用临时文件，避免写入过程中文件损坏）
+                if new_rows:
+                    new_df = pd.DataFrame(new_rows)
+                    df = pd.concat([df, new_df], ignore_index=True)
+                    # 使用.xlsx扩展名，pandas才能正确识别文件类型
+                    temp_file = self.financial_cache.replace('.xlsx', '_temp.xlsx')
+                    try:
+                        # 写入临时文件
+                        df.to_excel(temp_file, index=False, engine='openpyxl')
+                        # 确保写入完成，文件句柄关闭
+                        del df
+                        time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
+                        
+                        # 删除原文件（带重试机制）
+                        max_retries = 5
+                        for attempt in range(max_retries):
+                            try:
+                                if os.path.exists(self.financial_cache):
+                                    os.remove(self.financial_cache)
+                                break
+                            except PermissionError:
+                                if attempt < max_retries - 1:
+                                    time.sleep(0.2)  # 等待文件句柄释放
+                                else:
+                                    raise
+                        
+                        # 重命名临时文件
+                        os.rename(temp_file, self.financial_cache)
+                    except Exception as e:
+                        # 如果写入失败，删除临时文件
+                        if os.path.exists(temp_file):
+                            try:
+                                os.remove(temp_file)
+                            except:
+                                pass
+                        raise e
+            except Exception as e:
+                print(f"批量保存财务缓存失败: {e}")
     
     def get_stock_sectors(self, stock_code: str, force_refresh: bool = False) -> List[str]:
         """
@@ -466,7 +856,11 @@ class CacheManager:
         """
         if not force_refresh and self._is_cache_valid(self.stock_list_cache, 'stock_list'):
             try:
-                return pd.read_excel(self.stock_list_cache, engine='openpyxl')
+                df = pd.read_excel(self.stock_list_cache, engine='openpyxl')
+                # 确保代码是字符串类型，并格式化为6位（补零）
+                if 'code' in df.columns:
+                    df['code'] = df['code'].astype(str).str.zfill(6)
+                return df
             except Exception as e:
                 print(f"读取股票列表缓存失败: {e}")
         return None
@@ -478,6 +872,10 @@ class CacheManager:
             stock_list: 股票列表DataFrame
         """
         try:
+            # 确保代码是字符串类型，并格式化为6位（补零）
+            stock_list = stock_list.copy()
+            if 'code' in stock_list.columns:
+                stock_list['code'] = stock_list['code'].astype(str).str.zfill(6)
             stock_list.to_excel(self.stock_list_cache, index=False, engine='openpyxl')
         except Exception as e:
             print(f"保存股票列表缓存失败: {e}")
@@ -501,14 +899,19 @@ class CacheManager:
         if self._is_cache_valid(cache_file, 'kline'):
             try:
                 df = pd.read_excel(cache_file, engine='openpyxl')
-                # 确保date列是datetime类型
+                # 确保date列是datetime类型（处理日期格式）
                 if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date']).dt.date
                     df['date'] = pd.to_datetime(df['date'])
                     # 检查最新交易日数据是否存在
                     latest_date = df['date'].max()
                     today = datetime.now().date()
                     # 如果最新数据是今天或昨天（考虑交易日），则可以使用缓存
-                    if latest_date.date() >= today - timedelta(days=1):
+                    if isinstance(latest_date, pd.Timestamp):
+                        latest_date_date = latest_date.date()
+                    else:
+                        latest_date_date = latest_date
+                    if latest_date_date >= today - timedelta(days=1):
                         return df
                     # 否则返回None，需要重新下载
                 else:
@@ -578,7 +981,7 @@ class CacheManager:
                    cache_type: str = 'stock', period: str = 'daily', 
                    incremental: bool = True):
         """
-        保存K线数据到缓存（支持增量更新）
+        保存K线数据到缓存（支持增量更新和自动清理）
         Args:
             symbol: 股票代码/板块名称/概念名称
             data: K线数据DataFrame
@@ -592,22 +995,24 @@ class CacheManager:
             
             cache_file = self._get_kline_cache_path(symbol, cache_type, period)
             
-            # 确保date列存在
+            # 确保date列存在并转换为日期类型（不包含时间）
             if 'date' in data.columns:
                 data_to_save = data.copy()
+                # 将日期转换为只包含日期部分（不包含时间）
+                data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.date
             else:
                 data_to_save = data.copy()
                 if '日期' in data.columns:
-                    data_to_save['date'] = pd.to_datetime(data['日期'])
+                    data_to_save['date'] = pd.to_datetime(data['日期']).dt.date
             
             # 增量更新：合并现有缓存数据
             if incremental and os.path.exists(cache_file):
                 try:
                     existing_df = pd.read_excel(cache_file, engine='openpyxl')
                     if not existing_df.empty and 'date' in existing_df.columns:
-                        # 确保date列是datetime类型
-                        existing_df['date'] = pd.to_datetime(existing_df['date'])
-                        data_to_save['date'] = pd.to_datetime(data_to_save['date'])
+                        # 确保date列是日期类型（不包含时间）
+                        existing_df['date'] = pd.to_datetime(existing_df['date']).dt.date
+                        data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.date if isinstance(data_to_save['date'].iloc[0], str) else data_to_save['date']
                         
                         # 合并数据：保留旧数据，用新数据更新或追加
                         # 移除旧数据中与新数据日期重复的记录
@@ -622,8 +1027,53 @@ class CacheManager:
                     # 如果读取现有缓存失败，直接使用新数据
                     print(f"读取现有K线缓存失败，使用新数据覆盖 ({symbol}): {e}")
             
-            # 保存到缓存
-            data_to_save.to_excel(cache_file, index=False, engine='openpyxl')
+            # 数据清理：只保留最近N天的数据（可配置）
+            if 'date' in data_to_save.columns and not data_to_save.empty:
+                retention_days = getattr(config, 'KLINE_CACHE_RETENTION_DAYS', 250)
+                # 确保date列是datetime类型
+                data_to_save['date'] = pd.to_datetime(data_to_save['date'])
+                # 获取最新日期
+                latest_date = data_to_save['date'].max()
+                if isinstance(latest_date, pd.Timestamp):
+                    latest_date = latest_date.date()
+                elif hasattr(latest_date, 'date'):
+                    latest_date = latest_date.date()
+                else:
+                    latest_date = pd.to_datetime(latest_date).date()
+                
+                # 计算保留日期范围
+                cutoff_date = latest_date - timedelta(days=retention_days)
+                
+                # 过滤数据：只保留最近N天的数据
+                data_to_save = data_to_save[data_to_save['date'].dt.date >= cutoff_date].copy()
+                
+                # 将日期转换回日期格式（不包含时间）用于保存
+                data_to_save['date'] = data_to_save['date'].dt.date
+            
+            # 保存到缓存（使用openpyxl引擎，确保日期格式正确）
+            if not data_to_save.empty:
+                # 先保存为Excel
+                data_to_save.to_excel(cache_file, index=False, engine='openpyxl')
+                
+                # 设置日期列的格式为日期（不包含时间）
+                try:
+                    wb = load_workbook(cache_file)
+                    ws = wb.active
+                    # 找到date列的索引
+                    if 'date' in data_to_save.columns:
+                        date_col_idx = list(data_to_save.columns).index('date') + 1
+                        # 设置日期格式（只显示日期，不显示时间）
+                        date_style = NamedStyle(name='date_style', number_format='YYYY-MM-DD')
+                        for row in range(2, ws.max_row + 1):  # 跳过标题行
+                            cell = ws.cell(row=row, column=date_col_idx)
+                            if cell.value:
+                                # 确保单元格格式为日期
+                                cell.number_format = 'YYYY-MM-DD'
+                    wb.save(cache_file)
+                    wb.close()
+                except Exception as e:
+                    # 如果格式化失败，不影响数据保存
+                    pass
         except Exception as e:
             print(f"保存K线缓存失败 ({symbol}): {e}")
     
@@ -639,8 +1089,18 @@ class CacheManager:
         """
         # 清理symbol中的特殊字符，用于文件名
         safe_symbol = str(symbol).replace('/', '_').replace('\\', '_').replace(':', '_')
-        filename = f"{cache_type}_{safe_symbol}_{period}.xlsx"
-        return os.path.join(self.kline_cache_dir, filename)
+        filename = f"{safe_symbol}_{period}.xlsx"
+        
+        # 根据缓存类型选择正确的目录
+        if cache_type == 'sector':
+            cache_dir = self.sectors_cache_dir
+        elif cache_type == 'concept':
+            cache_dir = self.concepts_cache_dir
+        else:  # 'stock' 或其他
+            cache_dir = self.kline_cache_dir
+            filename = f"{cache_type}_{safe_symbol}_{period}.xlsx"  # stock类型保留前缀
+        
+        return os.path.join(cache_dir, filename)
     
     def check_cache_completeness(self, stock_codes: List[str], 
                                 data_types: List[str] = None) -> Dict[str, Dict]:
