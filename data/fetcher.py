@@ -407,15 +407,31 @@ class DataFetcher:
                             self.progress_callback('cached', f"{clean_code}: 最新交易日数据已存在，跳过下载")
                         return cached_kline
             
-            # 检查其他缓存
+            # 检查其他缓存，用于增量更新
             cached_kline = self.cache_manager.get_kline(clean_code, 'stock', period, self.force_refresh)
-            if cached_kline is not None and not cached_kline.empty:
+            cached_latest_date = None
+            if cached_kline is not None and not cached_kline.empty and not self.force_refresh:
                 if self.progress_callback:
                     self.progress_callback('cached', f"{clean_code}: K线数据已缓存（非最新）")
+                # 获取缓存中的最新日期，用于增量更新
+                if 'date' in cached_kline.columns:
+                    cached_kline['date'] = pd.to_datetime(cached_kline['date'])
+                    cached_latest_date = cached_kline['date'].max()
             
-            # 准备日期参数
+            # 准备日期参数（支持增量更新）
             if start_date is None:
-                start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
+                # 如果有缓存数据，从缓存最新日期+1天开始获取（增量更新）
+                if cached_latest_date is not None:
+                    # 从缓存最新日期的下一天开始
+                    start_date_obj = cached_latest_date + timedelta(days=1)
+                    # 如果下一天是周末，跳到下一个工作日
+                    while start_date_obj.weekday() >= 5:
+                        start_date_obj = start_date_obj + timedelta(days=1)
+                    start_date = start_date_obj.strftime('%Y%m%d')
+                else:
+                    # 没有缓存，获取最近120天的数据
+                    start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
+            
             if end_date is None:
                 if use_yesterday:
                     end_date_obj = analysis_date - timedelta(days=1)
@@ -424,6 +440,12 @@ class DataFetcher:
                     end_date = end_date_obj.strftime('%Y%m%d')
                 else:
                     end_date = analysis_date.strftime('%Y%m%d')
+            
+            # 如果start_date >= end_date，说明缓存已经是最新的，直接返回缓存
+            if cached_latest_date is not None and start_date >= end_date:
+                if self.progress_callback:
+                    self.progress_callback('cached', f"{clean_code}: 缓存已是最新，无需更新")
+                return cached_kline
             
             # 获取tushare代码格式（需要市场后缀）
             ts_code = self._get_ts_code(clean_code)
@@ -498,8 +520,22 @@ class DataFetcher:
                     if self.progress_callback:
                         self.progress_callback('info', f"{clean_code}: 已过滤今日不完整数据（{original_count} -> {len(kline)}条）")
             
-            # 保存到缓存
-            self.cache_manager.save_kline(clean_code, kline, 'stock', period)
+            # 增量更新：合并缓存数据和新获取的数据
+            if cached_kline is not None and not cached_kline.empty and not kline.empty:
+                # 合并新旧数据
+                if 'date' in kline.columns and 'date' in cached_kline.columns:
+                    kline['date'] = pd.to_datetime(kline['date'])
+                    cached_kline['date'] = pd.to_datetime(cached_kline['date'])
+                    # 合并：保留旧数据，追加新数据
+                    combined_kline = pd.concat([cached_kline, kline], ignore_index=True)
+                    # 按日期排序并去重（保留最新的）
+                    combined_kline = combined_kline.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+                    kline = combined_kline
+                    if self.progress_callback:
+                        self.progress_callback('info', f"{clean_code}: 增量更新完成（新增{len(kline) - len(cached_kline)}条数据）")
+            
+            # 保存到缓存（使用增量更新模式）
+            self.cache_manager.save_kline(clean_code, kline, 'stock', period, incremental=True)
             
             return kline
         except Exception as e:

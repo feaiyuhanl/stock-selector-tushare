@@ -575,20 +575,23 @@ class CacheManager:
             return False
     
     def save_kline(self, symbol: str, data: pd.DataFrame, 
-                   cache_type: str = 'stock', period: str = 'daily'):
+                   cache_type: str = 'stock', period: str = 'daily', 
+                   incremental: bool = True):
         """
-        保存K线数据到缓存
+        保存K线数据到缓存（支持增量更新）
         Args:
             symbol: 股票代码/板块名称/概念名称
             data: K线数据DataFrame
             cache_type: 缓存类型 ('stock', 'sector', 'concept')
             period: 周期 ('daily', 'weekly', 'monthly')
+            incremental: 是否增量更新（默认True，会合并现有缓存数据）
         """
         try:
             if data is None or data.empty:
                 return
             
             cache_file = self._get_kline_cache_path(symbol, cache_type, period)
+            
             # 确保date列存在
             if 'date' in data.columns:
                 data_to_save = data.copy()
@@ -597,6 +600,29 @@ class CacheManager:
                 if '日期' in data.columns:
                     data_to_save['date'] = pd.to_datetime(data['日期'])
             
+            # 增量更新：合并现有缓存数据
+            if incremental and os.path.exists(cache_file):
+                try:
+                    existing_df = pd.read_excel(cache_file, engine='openpyxl')
+                    if not existing_df.empty and 'date' in existing_df.columns:
+                        # 确保date列是datetime类型
+                        existing_df['date'] = pd.to_datetime(existing_df['date'])
+                        data_to_save['date'] = pd.to_datetime(data_to_save['date'])
+                        
+                        # 合并数据：保留旧数据，用新数据更新或追加
+                        # 移除旧数据中与新数据日期重复的记录
+                        existing_df = existing_df[~existing_df['date'].isin(data_to_save['date'])]
+                        
+                        # 合并新旧数据
+                        data_to_save = pd.concat([existing_df, data_to_save], ignore_index=True)
+                        
+                        # 按日期排序并去重（保留最新的）
+                        data_to_save = data_to_save.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+                except Exception as e:
+                    # 如果读取现有缓存失败，直接使用新数据
+                    print(f"读取现有K线缓存失败，使用新数据覆盖 ({symbol}): {e}")
+            
+            # 保存到缓存
             data_to_save.to_excel(cache_file, index=False, engine='openpyxl')
         except Exception as e:
             print(f"保存K线缓存失败 ({symbol}): {e}")

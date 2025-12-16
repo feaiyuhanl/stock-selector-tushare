@@ -456,7 +456,12 @@ class ScoringStrategy(BaseStrategy):
         stock_name_map = {}
         if stock_info is not None and not stock_info.empty:
             for _, row in stock_info.iterrows():
-                stock_name_map[row['code']] = row['name']
+                # 确保代码格式一致（转换为字符串并去除前导零等）
+                code = str(row['code']).zfill(6)  # 确保是6位数字
+                name = str(row['name']).strip()  # 去除空格
+                stock_name_map[code] = name
+                # 也支持不带前导零的格式
+                stock_name_map[str(int(code))] = name
         
         # 过滤ST股票
         def is_st_stock(stock_code: str) -> bool:
@@ -584,6 +589,8 @@ class ScoringStrategy(BaseStrategy):
             
             # 动态调整权重并重新计算得分
             adjusted_weights = adjust_weights_by_availability(data_availability)
+            # 保存调整后的权重，供主程序访问
+            self._last_adjusted_weights = adjusted_weights.copy()
             if adjusted_weights != self.weights:
                 print("\n根据数据可用性动态调整权重:")
                 for key in self.weights:
@@ -603,6 +610,9 @@ class ScoringStrategy(BaseStrategy):
                     )
                     result['score'] = round(total_score, 2)
                     result['total_score'] = round(total_score, 2)
+            else:
+                # 即使没有调整，也保存当前权重
+                self._last_adjusted_weights = self.weights.copy()
         
         if not results:
             print("未找到符合条件的股票")
@@ -610,6 +620,14 @@ class ScoringStrategy(BaseStrategy):
         
         # 转换为DataFrame并排序
         df = pd.DataFrame(results)
+        
+        # 确保name列存在且不为空，如果为空则从stock_name_map补充
+        if 'name' in df.columns:
+            for idx, row in df.iterrows():
+                if pd.isna(row['name']) or str(row['name']).strip() == '':
+                    code = str(row['code']).zfill(6)
+                    df.at[idx, 'name'] = stock_name_map.get(code, stock_name_map.get(str(int(code)), ''))
+        
         # 使用score字段排序（策略基类要求）
         sort_column = 'score' if 'score' in df.columns else 'total_score'
         df = df.sort_values(sort_column, ascending=False)
@@ -618,6 +636,11 @@ class ScoringStrategy(BaseStrategy):
         # 重置索引
         df.reset_index(drop=True, inplace=True)
         df.index = df.index + 1  # 从1开始编号
+        
+        # 确保列顺序：code, name在前
+        if 'code' in df.columns and 'name' in df.columns:
+            cols = ['code', 'name'] + [col for col in df.columns if col not in ['code', 'name']]
+            df = df[cols]
         
         return df
 

@@ -88,10 +88,121 @@ class StockSelector:
         self.strategy.data_fetcher.cache_manager.clear_cache(cache_type)
 
 
+def _print_status_info():
+    """打印程序状态信息"""
+    from data.fetcher import should_use_yesterday_data, is_trading_time
+    
+    print("=" * 60)
+    print("A股选股程序 - 打分策略")
+    print("=" * 60)
+    
+    in_trading = is_trading_time()
+    use_yesterday = should_use_yesterday_data()
+    
+    if in_trading:
+        print("当前状态：交易中，使用昨天收盘后的完整数据进行分析")
+    elif use_yesterday:
+        print("当前状态：非交易时间，使用最近一个交易日的完整数据进行分析")
+    else:
+        print("当前状态：收盘后，使用今天收盘后的完整数据进行分析")
+
+
+def _print_dimension_info(selector: StockSelector):
+    """打印评分维度信息"""
+    actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
+    
+    dimension_names = {
+        'fundamental': '基本面评分',
+        'volume': '成交量评分',
+        'price': '价格评分',
+        'sector': '板块走势评分',
+        'concept': '概念走势评分'
+    }
+    
+    dimension_details = {
+        'fundamental': ['PE市盈率', 'PB市净率', 'ROE净资产收益率', '营收增长率', '利润增长率'],
+        'volume': ['量比', '换手率', '成交量趋势'],
+        'price': ['价格趋势', '价格位置', '波动率'],
+        'sector': ['板块趋势', '相对强度'],
+        'concept': ['概念趋势', '相对强度']
+    }
+    
+    print("\n【最终打分维度说明】")
+    print("-" * 60)
+    print("采用的评分维度及权重：")
+    
+    used_dimensions = []
+    for dim_key, dim_name in dimension_names.items():
+        weight = actual_weights.get(dim_key, 0)
+        if weight > 0:
+            used_dimensions.append(dim_key)
+            print(f"  ✓ {dim_name}: {weight*100:.1f}%")
+            if dim_key in dimension_details:
+                print(f"    └─ 子维度: {', '.join(dimension_details[dim_key])}")
+    
+    # 检查缺失的维度
+    missing_dimensions = []
+    for dim_key, dim_name in dimension_names.items():
+        weight = actual_weights.get(dim_key, 0)
+        if weight == 0:
+            missing_dimensions.append((dim_key, dim_name))
+    
+    if missing_dimensions:
+        print("\n【缺失指标提示】")
+        print("-" * 60)
+        for dim_key, dim_name in missing_dimensions:
+            print(f"  ⚠ {dim_name}未采用（数据不可用或权重已调整）")
+            if dim_key == 'fundamental':
+                print("    原因: 基本面数据（PE、PB）缺失或无效")
+            elif dim_key == 'sector':
+                print("    原因: 板块K线数据缺失或不可用")
+            elif dim_key == 'concept':
+                print("    原因: 概念K线数据缺失或不可用")
+    
+    return used_dimensions, actual_weights, dimension_names
+
+
+def _print_results(results: pd.DataFrame, selector: StockSelector):
+    """打印选股结果"""
+    if results.empty:
+        print("未找到符合条件的股票")
+        return
+    
+    print("\n" + "=" * 60)
+    print(f"TOP {len(results)} 只股票:")
+    print("=" * 60)
+    
+    # 显示维度信息
+    used_dimensions, actual_weights, dimension_names = _print_dimension_info(selector)
+    
+    print("\n" + "=" * 60)
+    
+    # 设置pandas显示选项
+    pd.set_option('display.unicode.east_asian_width', True)
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', None)
+    pd.set_option('display.max_colwidth', None)
+    print(results.to_string(index=False))
+    
+    # 显示评分公式
+    print("\n" + "=" * 60)
+    print("【评分说明】")
+    print("-" * 60)
+    print("总评分 = ", end="")
+    score_formula = []
+    for dim_key in used_dimensions:
+        weight = actual_weights.get(dim_key, 0)
+        dim_name = dimension_names[dim_key]
+        score_formula.append(f"{dim_name} × {weight*100:.1f}%")
+    print(" + ".join(score_formula))
+    print("=" * 60)
+
+
 def main():
     """主函数"""
     import argparse
     
+    # 解析命令行参数
     parser = argparse.ArgumentParser(description='A股选股程序 - 打分策略')
     parser.add_argument('--refresh', action='store_true', help='强制刷新缓存')
     parser.add_argument('--strategy', type=str, default='scoring', help='选股策略 (scoring)')
@@ -102,45 +213,18 @@ def main():
                        default=config.DEFAULT_BOARD_TYPES,
                        help='板块类型：main(主板), sme(中小板), gem(创业板), star(科创板), bse(北交所), b(B股)')
     parser.add_argument('--workers', type=int, default=config.DEFAULT_MAX_WORKERS, help='线程数')
-    parser.add_argument('--skip-source-test', action='store_true', help='跳过数据源测试（仅用于调试，不推荐）')
-    
     args = parser.parse_args()
     
-    print("=" * 60)
-    print("A股选股程序 - 打分策略")
-    print("=" * 60)
-    
-    # 显示数据日期信息
-    from data.fetcher import should_use_yesterday_data, get_analysis_date, is_trading_time
-    use_yesterday = should_use_yesterday_data()
-    analysis_date = get_analysis_date()
-    in_trading = is_trading_time()
-    
-    if in_trading:
-        print(f"当前状态：交易中，使用昨天收盘后的完整数据进行分析")
-    elif use_yesterday:
-        print(f"当前状态：非交易时间，使用最近一个交易日的完整数据进行分析")
-    else:
-        print(f"当前状态：收盘后，使用今天收盘后的完整数据进行分析")
-    
+    # 打印状态信息
+    _print_status_info()
     if args.refresh:
         print("强制刷新模式：将重新获取所有数据")
     
     # 创建选股器
-    test_sources = not args.skip_source_test  # 默认测试数据源，除非指定跳过
-    if args.strategy == 'scoring':
-        strategy = ScoringStrategy(force_refresh=args.refresh, test_sources=test_sources)
-    else:
-        print(f"未知策略: {args.strategy}，使用默认打分策略")
-        strategy = ScoringStrategy(force_refresh=args.refresh, test_sources=test_sources)
-    
+    strategy = ScoringStrategy(force_refresh=args.refresh)
     selector = StockSelector(strategy=strategy, force_refresh=args.refresh)
     
-    # 确定要评估的股票
-    test_stocks = args.stocks if args.stocks else None
-    
-    # 执行选股（数据获取和计算已分离）
-    # select_top_stocks 内部会先预加载所有数据，再进行计算
+    # 执行选股
     try:
         print("\n" + "=" * 60)
         print("开始执行选股流程")
@@ -151,17 +235,15 @@ def main():
         print("=" * 60)
         
         results = selector.select_top_stocks(
-            stock_codes=test_stocks, 
+            stock_codes=args.stocks, 
             top_n=args.top_n,
             board_types=args.board,
             max_workers=args.workers
         )
     except KeyboardInterrupt:
-        # Ctrl+C中断，缓存已在信号处理器中保存
         print("\n程序被用户中断")
         return
     except Exception as e:
-        # 其他异常，尝试保存缓存
         print(f"\n程序执行出错: {e}")
         try:
             saved_count = selector.strategy.data_fetcher.flush_batch_cache()
@@ -171,20 +253,8 @@ def main():
             print(f"[警告] 保存缓存失败: {cache_error}")
         raise
     
-    if not results.empty:
-        print("\n" + "=" * 60)
-        print(f"TOP {len(results)} 只股票:")
-        print("=" * 60)
-        # 设置pandas显示选项，确保中文正确显示
-        pd.set_option('display.unicode.east_asian_width', True)
-        pd.set_option('display.max_columns', None)
-        pd.set_option('display.width', None)
-        pd.set_option('display.max_colwidth', None)
-        print(results.to_string(index=False))
-        
-        # 如需保存结果，可手动调用：selector.save_results(results)
-    else:
-        print("未找到符合条件的股票")
+    # 打印结果
+    _print_results(results, selector)
 
 
 if __name__ == '__main__':
