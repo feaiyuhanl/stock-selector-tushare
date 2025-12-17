@@ -12,8 +12,7 @@ from scorers import (
     FundamentalScorer,
     VolumeScorer,
     PriceScorer,
-    SectorScorer,
-    ConceptScorer
+    SectorScorer
 )
 
 
@@ -33,7 +32,6 @@ class ScoringStrategy(BaseStrategy):
         self.volume_scorer = VolumeScorer()
         self.price_scorer = PriceScorer()
         self.sector_scorer = SectorScorer()
-        self.concept_scorer = ConceptScorer()
         self.weights = config.WEIGHT_CONFIG
     
     def evaluate_stock(self, stock_code: str, stock_name: str = "", 
@@ -74,11 +72,10 @@ class ScoringStrategy(BaseStrategy):
             if financial_data is None:
                 financial_data = {}
             
-            # 4. 获取板块和概念信息（带缓存）
+            # 4. 获取板块信息（带缓存）
             if progress_callback:
-                progress_callback('loading', f"{stock_code} {stock_name}: 获取板块概念信息...")
+                progress_callback('loading', f"{stock_code} {stock_name}: 获取板块信息...")
             sectors = self.data_fetcher.get_stock_sectors(stock_code)
-            concepts = self.data_fetcher.get_stock_concepts(stock_code)
             
             # 5. 获取板块K线数据（实时数据，不缓存）
             # 优化：减少板块K线获取，只取1个最重要的板块，避免过多请求
@@ -96,42 +93,23 @@ class ScoringStrategy(BaseStrategy):
             elif progress_callback:
                 progress_callback('info', f"{stock_code} {stock_name}: 无板块信息")
             
-            # 6. 获取概念K线数据（实时数据，不缓存）
-            # 获取所有概念的K线数据，用于加权平均计算
-            concept_kline_list = []
-            if concepts:
-                for concept in concepts:
-                    try:
-                        concept_kline = self.data_fetcher.get_concept_kline(concept)
-                        if concept_kline is not None and not concept_kline.empty:
-                            concept_kline_list.append(concept_kline)
-                        elif progress_callback:
-                            progress_callback('info', f"{stock_code} {stock_name}: 概念 '{concept}' K线数据获取失败或为空")
-                    except Exception as e:
-                        if progress_callback:
-                            progress_callback('info', f"{stock_code} {stock_name}: 概念 '{concept}' K线获取异常: {str(e)[:50]}")
-            elif progress_callback:
-                progress_callback('info', f"{stock_code} {stock_name}: 无概念信息（可能需要2000积分）")
-            
-            # 7. 计算各维度得分
+            # 6. 计算各维度得分
             if progress_callback:
                 progress_callback('loading', f"{stock_code} {stock_name}: 计算评分...")
             fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
             volume_score = self.volume_scorer.score(kline_data)
             price_score = self.price_scorer.score(kline_data)
             sector_score = self.sector_scorer.score(sector_kline_list, kline_data)
-            concept_score = self.concept_scorer.score(concept_kline_list, kline_data)
             
-            # 8. 计算综合得分
+            # 7. 计算综合得分
             total_score = (
                 fundamental_score * self.weights['fundamental'] +
                 volume_score * self.weights['volume'] +
                 price_score * self.weights['price'] +
-                sector_score * self.weights['sector'] +
-                concept_score * self.weights['concept']
+                sector_score * self.weights['sector']
             )
             
-            # 9. 获取当前价格信息
+            # 8. 获取当前价格信息
             current_price = kline_data['close'].iloc[-1] if not kline_data.empty else 0
             current_volume = kline_data['volume'].iloc[-1] if not kline_data.empty else 0
             
@@ -144,18 +122,14 @@ class ScoringStrategy(BaseStrategy):
                 'volume_score': round(volume_score, 2),
                 'price_score': round(price_score, 2),
                 'sector_score': round(sector_score, 2),
-                'concept_score': round(concept_score, 2),
                 'current_price': round(current_price, 2),
                 'current_volume': current_volume,
                 'pe_ratio': fundamental_data.get('pe_ratio', 0),
                 'pb_ratio': fundamental_data.get('pb_ratio', 0),
                 'roe': financial_data.get('roe', 0),
                 'sectors': sectors,  # 添加板块信息，方便调试
-                'concepts': concepts,  # 添加概念信息，方便调试
                 'sector_count': len(sectors),  # 板块数量
-                'concept_count': len(concepts),  # 概念数量
                 'has_sector_kline': len(sector_kline_list) > 0,  # 是否有板块K线数据
-                'has_concept_kline': len(concept_kline_list) > 0,  # 是否有概念K线数据
             }
             
             if progress_callback:
@@ -180,7 +154,7 @@ class ScoringStrategy(BaseStrategy):
             stock_name_map: 股票名称映射字典
             max_workers: 最大线程数
         Returns:
-            预加载的数据字典，格式为 {stock_code: {kline_data, fundamental_data, financial_data, sectors, concepts, sector_kline_list, concept_kline_list}}
+            预加载的数据字典，格式为 {stock_code: {kline_data, fundamental_data, financial_data, sectors, sector_kline_list}}
         """
         preloaded_data = {}
         total = len(stock_codes)
@@ -207,9 +181,8 @@ class ScoringStrategy(BaseStrategy):
                 if financial_data is None:
                     financial_data = {}
                 
-                # 4. 获取板块和概念信息（带缓存）
+                # 4. 获取板块信息（带缓存）
                 sectors = self.data_fetcher.get_stock_sectors(stock_code)
-                concepts = self.data_fetcher.get_stock_concepts(stock_code)
                 
                 # 5. 获取板块K线数据（实时数据，不缓存）
                 sector_kline_list = []
@@ -222,27 +195,12 @@ class ScoringStrategy(BaseStrategy):
                         # 板块K线获取失败不影响评分，静默处理
                         pass
                 
-                # 6. 获取概念K线数据（实时数据，不缓存）
-                # 获取所有概念的K线数据，用于加权平均计算
-                concept_kline_list = []
-                if concepts:
-                    for concept in concepts:
-                        try:
-                            concept_kline = self.data_fetcher.get_concept_kline(concept)
-                            if concept_kline is not None and not concept_kline.empty:
-                                concept_kline_list.append(concept_kline)
-                        except Exception as e:
-                            # 概念K线获取失败不影响评分，静默处理
-                            pass
-                
                 data = {
                     'kline_data': kline_data,
                     'fundamental_data': fundamental_data,
                     'financial_data': financial_data,
                     'sectors': sectors,
-                    'concepts': concepts,
                     'sector_kline_list': sector_kline_list,
-                    'concept_kline_list': concept_kline_list,
                     'stock_name': stock_name
                 }
                 
@@ -424,22 +382,19 @@ class ScoringStrategy(BaseStrategy):
                     fundamental_data = data['fundamental_data']
                     financial_data = data['financial_data']
                     sector_kline_list = data['sector_kline_list']
-                    concept_kline_list = data['concept_kline_list']
                     
                     # 计算各维度得分
                     fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
                     volume_score = self.volume_scorer.score(kline_data)
                     price_score = self.price_scorer.score(kline_data)
                     sector_score = self.sector_scorer.score(sector_kline_list, kline_data)
-                    concept_score = self.concept_scorer.score(concept_kline_list, kline_data)
                     
                     # 计算综合得分
                     total_score = (
                         fundamental_score * self.weights['fundamental'] +
                         volume_score * self.weights['volume'] +
                         price_score * self.weights['price'] +
-                        sector_score * self.weights['sector'] +
-                        concept_score * self.weights['concept']
+                        sector_score * self.weights['sector']
                     )
                     
                     # 获取当前价格信息
@@ -455,18 +410,14 @@ class ScoringStrategy(BaseStrategy):
                         'volume_score': round(volume_score, 2),
                         'price_score': round(price_score, 2),
                         'sector_score': round(sector_score, 2),
-                        'concept_score': round(concept_score, 2),
                         'current_price': round(current_price, 2),
                         'current_volume': current_volume,
                         'pe_ratio': fundamental_data.get('pe_ratio', 0),
                         'pb_ratio': fundamental_data.get('pb_ratio', 0),
                         'roe': financial_data.get('roe', 0),
                         'sectors': data.get('sectors', []),  # 添加板块信息
-                        'concepts': data.get('concepts', []),  # 添加概念信息
                         'sector_count': len(data.get('sectors', [])),  # 板块数量
-                        'concept_count': len(data.get('concepts', [])),  # 概念数量
                         'has_sector_kline': len(data.get('sector_kline_list', [])) > 0,  # 是否有板块K线数据
-                        'has_concept_kline': len(data.get('concept_kline_list', [])) > 0,  # 是否有概念K线数据
                     }
                     
                     results.append(result)
@@ -538,46 +489,6 @@ class ScoringStrategy(BaseStrategy):
         # 按涨幅降序排序，取TOP 3
         sorted_sectors = sorted(sector_trends.values(), key=lambda x: x['trend'], reverse=True)
         return sorted_sectors[:3]
-    
-    def calculate_hot_concepts(self, results: List[Dict]) -> List[Dict]:
-        """
-        计算热点概念（按概念评分和涉及股票数量）
-        Args:
-            results: 股票评分结果列表
-        Returns:
-            热点概念列表（最多10个）
-        """
-        concept_stats = {}  # {concept_name: {'stocks': count, 'avg_score': float, 'total_score': float}}
-        
-        for result in results:
-            concepts = result.get('concepts', [])
-            concept_score = result.get('concept_score', 50)
-            
-            for concept in concepts:
-                if concept not in concept_stats:
-                    concept_stats[concept] = {
-                        'concept': concept,
-                        'stock_count': 0,
-                        'avg_score': 0.0,
-                        'total_score': 0.0
-                    }
-                
-                concept_stats[concept]['stock_count'] += 1
-                concept_stats[concept]['total_score'] += concept_score
-                concept_stats[concept]['avg_score'] = concept_stats[concept]['total_score'] / concept_stats[concept]['stock_count']
-        
-        # 按平均评分和股票数量加权排序（评分权重70%，股票数量权重30%）
-        for concept_name, stats in concept_stats.items():
-            # 归一化股票数量（假设最多100只）
-            normalized_count = min(stats['stock_count'] / 100.0, 1.0)
-            # 归一化评分
-            normalized_score = stats['avg_score'] / 100.0
-            # 综合热度 = 0.7 * 评分 + 0.3 * 股票数量
-            stats['hot_score'] = 0.7 * normalized_score + 0.3 * normalized_count
-        
-        # 按热度降序排序，取TOP 10
-        sorted_concepts = sorted(concept_stats.values(), key=lambda x: x['hot_score'], reverse=True)
-        return sorted_concepts[:10]
     
     def select_top_stocks(self, stock_codes: List[str] = None, top_n: int = 20, 
                          board_types: List[str] = None, max_workers: int = 5) -> pd.DataFrame:
@@ -656,7 +567,6 @@ class ScoringStrategy(BaseStrategy):
             'fundamental': {'available': 0, 'total': 0},
             'financial': {'available': 0, 'total': 0},
             'sector': {'available': 0, 'total': 0},
-            'concept': {'available': 0, 'total': 0},
         }
         
         def collect_data_availability(results_list: List[Dict]):
@@ -682,13 +592,6 @@ class ScoringStrategy(BaseStrategy):
                 if (sector_score != 50) or has_sector_info:
                     data_availability['sector']['available'] += 1
                 
-                # 统计概念数据可用性（检查是否有概念K线数据）
-                data_availability['concept']['total'] += 1
-                # 如果概念评分存在且不是默认的50分，或者有概念信息，认为数据可用
-                concept_score = result.get('concept_score', 50)
-                has_concept_info = result.get('concepts', []) or result.get('concept_count', 0) > 0
-                if (concept_score != 50) or has_concept_info:
-                    data_availability['concept']['available'] += 1
         
         def adjust_weights_by_availability(availability_stats: Dict) -> Dict:
             """
@@ -706,7 +609,6 @@ class ScoringStrategy(BaseStrategy):
             fundamental_ratio = availability_stats['fundamental']['available'] / total_stocks if total_stocks > 0 else 0
             financial_ratio = availability_stats['financial']['available'] / total_stocks if total_stocks > 0 else 0
             sector_ratio = availability_stats['sector']['available'] / total_stocks if total_stocks > 0 else 0
-            concept_ratio = availability_stats['concept']['available'] / total_stocks if total_stocks > 0 else 0
             
             # 如果所有股票都缺失某个指标，权重设为0
             if fundamental_ratio == 0:
@@ -723,10 +625,6 @@ class ScoringStrategy(BaseStrategy):
                 print(f"    提示: 板块数据需要：1) 股票有行业信息 2) 能找到对应的行业指数 3) 能获取指数K线数据")
                 print(f"    可能原因: 行业指数匹配失败、指数K线数据获取失败、或需要2000积分")
             
-            if concept_ratio == 0:
-                adjusted_weights['concept'] = 0
-                print(f"  警告: 所有股票都缺失概念数据，已移除概念权重")
-                print(f"    提示: 概念数据需要2000积分以上才能获取，免费用户无法使用概念评分")
             
             # 重新归一化权重（确保总和为1）
             total_weight = sum(adjusted_weights.values())
@@ -750,7 +648,6 @@ class ScoringStrategy(BaseStrategy):
             print(f"  基本面数据: {data_availability['fundamental']['available']}/{data_availability['fundamental']['total']} ({data_availability['fundamental']['available']/data_availability['fundamental']['total']*100:.1f}%)")
             print(f"  财务数据: {data_availability['financial']['available']}/{data_availability['financial']['total']} ({data_availability['financial']['available']/data_availability['financial']['total']*100:.1f}%)")
             print(f"  板块数据: {data_availability['sector']['available']}/{data_availability['sector']['total']} ({data_availability['sector']['available']/data_availability['sector']['total']*100:.1f}%)")
-            print(f"  概念数据: {data_availability['concept']['available']}/{data_availability['concept']['total']} ({data_availability['concept']['available']/data_availability['concept']['total']*100:.1f}%)")
             print("=" * 60)
             
             # 动态调整权重并重新计算得分
@@ -771,8 +668,7 @@ class ScoringStrategy(BaseStrategy):
                         result.get('fundamental_score', 0) * adjusted_weights['fundamental'] +
                         result.get('volume_score', 0) * adjusted_weights['volume'] +
                         result.get('price_score', 0) * adjusted_weights['price'] +
-                        result.get('sector_score', 0) * adjusted_weights['sector'] +
-                        result.get('concept_score', 0) * adjusted_weights['concept']
+                        result.get('sector_score', 0) * adjusted_weights['sector']
                     )
                     result['score'] = round(total_score, 2)
                     result['total_score'] = round(total_score, 2)
@@ -808,21 +704,17 @@ class ScoringStrategy(BaseStrategy):
             cols = ['code', 'name'] + [col for col in df.columns if col not in ['code', 'name']]
             df = df[cols]
         
-        # 计算板块趋势涨幅TOP 3和热点概念
+        # 计算板块趋势涨幅TOP 3
         print("\n" + "=" * 60)
-        print("计算板块趋势和热点概念...")
+        print("计算板块趋势...")
         print("=" * 60)
         self._top_sectors = self.calculate_sector_trends(results)
-        self._hot_concepts = self.calculate_hot_concepts(results)
         
-        # 格式化板块和概念信息用于显示
+        # 格式化板块信息用于显示
         for idx, row in df.iterrows():
             sectors = row.get('sectors', [])
-            concepts = row.get('concepts', [])
             if isinstance(sectors, list):
                 df.at[idx, 'sectors'] = ', '.join(sectors) if sectors else '无'
-            if isinstance(concepts, list):
-                df.at[idx, 'concepts'] = ', '.join(concepts[:5]) if concepts else '无'  # 最多显示5个概念
         
         return df
 

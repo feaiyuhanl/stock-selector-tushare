@@ -200,6 +200,14 @@ class DataFetcher:
         self._cache_lock = threading.Lock()
         self._batch_lock = threading.Lock()
         
+        # 行业分类映射表（使用 index_classify + index_member）
+        # {stock_code: [industry_name1, industry_name2, ...]}
+        self._stock_industry_map: Dict[str, List[str]] = {}
+        # {industry_name: index_code}
+        self._industry_index_map: Dict[str, str] = {}
+        self._industry_map_loaded = False
+        self._industry_map_lock = threading.Lock()
+        
         # 测试数据源
         if test_sources:
             try:
@@ -329,6 +337,79 @@ class DataFetcher:
                 return digits[0]
         
         return stock_code
+    
+    def _load_industry_mapping(self):
+        """
+        加载行业分类映射表（使用 index_classify + index_member）
+        建立股票到行业的映射表和行业到指数代码的映射表
+        """
+        with self._industry_map_lock:
+            if self._industry_map_loaded:
+                return
+            
+            try:
+                if self.progress_callback:
+                    self.progress_callback('loading', "正在加载行业分类映射表...")
+                
+                # 1. 获取申万一级行业分类
+                industries_df = self.pro.index_classify(level='L1', src='SW2021')
+                if industries_df is None or industries_df.empty:
+                    if self.progress_callback:
+                        self.progress_callback('warning', "无法获取行业分类数据")
+                    return
+                
+                # 2. 建立行业名称到指数代码的映射
+                for _, industry in industries_df.iterrows():
+                    industry_name = industry.get('industry_name', '').strip()
+                    index_code = industry.get('index_code', '').strip()
+                    if industry_name and index_code:
+                        self._industry_index_map[industry_name] = index_code
+                
+                # 3. 批量获取每个行业的成分股，建立股票到行业的映射
+                total_industries = len(industries_df)
+                for idx, (_, industry) in enumerate(industries_df.iterrows(), 1):
+                    index_code = industry.get('index_code', '').strip()
+                    industry_name = industry.get('industry_name', '').strip()
+                    
+                    if not index_code or not industry_name:
+                        continue
+                    
+                    try:
+                        # 获取该行业的成分股
+                        members_df = self.pro.index_member(index_code=index_code)
+                        if members_df is not None and not members_df.empty:
+                            for _, member in members_df.iterrows():
+                                stock_code = member.get('con_code', '').strip()
+                                if stock_code:
+                                    # 转换为标准格式（6位数字）
+                                    clean_code = self._format_stock_code(stock_code)
+                                    if clean_code and len(clean_code) == 6:
+                                        if clean_code not in self._stock_industry_map:
+                                            self._stock_industry_map[clean_code] = []
+                                        if industry_name not in self._stock_industry_map[clean_code]:
+                                            self._stock_industry_map[clean_code].append(industry_name)
+                        
+                        # 控制请求频率
+                        if idx % 10 == 0:
+                            import time
+                            time.sleep(0.3)
+                    except Exception as e:
+                        if self.progress_callback:
+                            self.progress_callback('warning', f"获取行业 {industry_name} 成分股失败: {e}")
+                        continue
+                
+                self._industry_map_loaded = True
+                msg = f"已加载 {len(self._industry_index_map)} 个行业分类，覆盖 {len(self._stock_industry_map)} 只股票"
+                if self.progress_callback:
+                    self.progress_callback('success', msg)
+                else:
+                    print(msg)
+                    
+            except Exception as e:
+                if self.progress_callback:
+                    self.progress_callback('error', f"加载行业分类映射表失败: {e}")
+                else:
+                    print(f"加载行业分类映射表失败: {e}")
     
     def _load_stock_list(self):
         """加载A股股票列表（带缓存）"""
@@ -576,6 +657,7 @@ class DataFetcher:
     def get_stock_fundamental(self, stock_code: str) -> Optional[Dict]:
         """
         获取股票基本面数据（带缓存）
+        优化：使用日期范围参数获取数据，更稳定；保留None值，不转换为0
         """
         stock_code = str(stock_code)
         clean_code = self._format_stock_code(stock_code)
@@ -594,17 +676,47 @@ class DataFetcher:
                 return None
             
             def fetch_fundamental():
-                # 获取每日指标（包含PE、PB等）
-                today = datetime.now().strftime('%Y%m%d')
-                df = self.pro.daily_basic(ts_code=ts_code, trade_date=today, fields='ts_code,trade_date,pe,pb,ps,turnover_rate')
+                # 使用日期范围参数获取数据（参考 get_stock_kline 的实现）
+                # 获取最近5个交易日的数据，确保能获取到有效数据
+                analysis_date = get_analysis_date()
+                end_date = analysis_date.strftime('%Y%m%d')
+                start_date = (analysis_date - timedelta(days=7)).strftime('%Y%m%d')  # 往前推7天，确保覆盖5个交易日
+                
+                # 使用 start_date 和 end_date 参数，更稳定
+                df = self.pro.daily_basic(ts_code=ts_code, 
+                                         start_date=start_date, 
+                                         end_date=end_date,
+                                         fields='ts_code,trade_date,pe,pb,ps,turnover_rate')
                 
                 if df is not None and not df.empty:
-                    latest = df.iloc[-1]
+                    # 按日期排序，取最新的数据
+                    df = df.sort_values('trade_date', ascending=False)
+                    latest = df.iloc[0]
+                    
+                    # 改进 None/NaN 值处理：保留 None，不转换为 0
+                    # 区分"值为0"（可能是正常值）和"值为None/NaN"（数据缺失）
+                    def safe_float_or_none(value):
+                        """安全转换为float，保留None/NaN"""
+                        if value is None:
+                            return None
+                        if isinstance(value, float) and pd.isna(value):
+                            return None
+                        try:
+                            if isinstance(value, str):
+                                value = value.replace(',', '').replace('--', '').replace('-', '')
+                                if not value or value == '':
+                                    return None
+                            result = float(value)
+                            # 如果转换后为0，但原始值不是0，可能是转换错误
+                            return result
+                        except (ValueError, TypeError):
+                            return None
+                    
                     return {
-                        'pe_ratio': self._safe_float(latest.get('pe', 0)),
-                        'pb_ratio': self._safe_float(latest.get('pb', 0)),
-                        'ps_ratio': self._safe_float(latest.get('ps', 0)),
-                        'turnover_rate': self._safe_float(latest.get('turnover_rate', 0)),
+                        'pe_ratio': safe_float_or_none(latest.get('pe')),
+                        'pb_ratio': safe_float_or_none(latest.get('pb')),
+                        'ps_ratio': safe_float_or_none(latest.get('ps')),
+                        'turnover_rate': safe_float_or_none(latest.get('turnover_rate')),
                     }
                 return None
             
@@ -710,7 +822,7 @@ class DataFetcher:
     
     def get_stock_sectors(self, stock_code: str, force_refresh: bool = None) -> List[str]:
         """
-        获取股票所属板块（带缓存）
+        获取股票所属板块（使用 index_classify + index_member，带缓存）
         """
         stock_code = str(stock_code)
         clean_code = self._format_stock_code(stock_code)
@@ -725,27 +837,24 @@ class DataFetcher:
         if cached_sectors is not None:
             return cached_sectors
         
-        # 从网络获取
+        # 加载行业映射表（如果未加载）
+        if not self._industry_map_loaded:
+            self._load_industry_mapping()
+        
+        # 从映射表获取
         try:
-            ts_code = self._get_ts_code(clean_code)
-            if not ts_code:
-                return []
+            with self._industry_map_lock:
+                sectors = self._stock_industry_map.get(clean_code, [])
             
-            def fetch_sectors():
-                # 获取股票所属行业（板块）
-                df = self.pro.stock_basic(ts_code=ts_code, fields='ts_code,industry')
-                if df is not None and not df.empty:
-                    industry = df.iloc[0].get('industry', '')
-                    if industry and industry.strip():
-                        return [industry.strip()]
-                return []
-            
-            sectors = self._retry_request(fetch_sectors, max_retries=2, timeout=10)
             if sectors:
+                # 保存到缓存
                 self.cache_manager.save_stock_sectors(clean_code, sectors)
                 return sectors
         except Exception as e:
-            print(f"获取 {stock_code} 板块信息失败: {e}")
+            if self.progress_callback:
+                self.progress_callback('warning', f"获取 {stock_code} 板块信息失败: {e}")
+            else:
+                print(f"获取 {stock_code} 板块信息失败: {e}")
         
         # 保存空列表到缓存，避免重复请求
         self.cache_manager.save_stock_sectors(clean_code, [])
@@ -776,13 +885,42 @@ class DataFetcher:
             
             def fetch_concepts():
                 # 获取股票所属概念
+                # 正确方式：先获取所有概念列表，然后遍历每个概念检查是否包含该股票
                 try:
-                    concept_df = self.pro.concept_detail(ts_code=ts_code, fields='id,name')
-                    if concept_df is not None and not concept_df.empty:
-                        concepts = concept_df['name'].dropna().tolist()
-                        # 过滤空字符串
-                        concepts = [c.strip() for c in concepts if c and c.strip()]
-                        return concepts
+                    # 1. 获取所有概念列表
+                    all_concepts_df = self.pro.concept()
+                    if all_concepts_df is None or all_concepts_df.empty:
+                        return []
+                    
+                    # 2. 遍历每个概念，检查是否包含该股票
+                    stock_concepts = []
+                    for _, concept_row in all_concepts_df.iterrows():
+                        # concept接口返回的字段是code
+                        concept_id = concept_row.get('code') or concept_row.get('id')
+                        concept_name = concept_row.get('name', '')
+                        
+                        if not concept_id or not concept_name:
+                            continue
+                        
+                        try:
+                            # 获取该概念的股票列表
+                            stocks_df = self.pro.concept_detail(id=concept_id, fields='ts_code')
+                            if stocks_df is not None and not stocks_df.empty:
+                                # 检查该股票是否在该概念的股票列表中
+                                if ts_code in stocks_df['ts_code'].values:
+                                    stock_concepts.append(concept_name.strip())
+                            
+                            # 控制请求频率，避免超过API限制
+                            import time
+                            time.sleep(self.min_request_interval)
+                        except Exception as e:
+                            # 某个概念获取失败，继续下一个
+                            # 如果是权限问题，停止遍历
+                            if "积分" in str(e) or "权限" in str(e) or "最多访问" in str(e):
+                                break
+                            continue
+                    
+                    return stock_concepts
                 except Exception as e:
                     # 可能是积分不足或其他错误
                     if self.progress_callback:
@@ -806,7 +944,7 @@ class DataFetcher:
     def get_sector_kline(self, sector_name: str, period: str = "daily") -> Optional[pd.DataFrame]:
         """
         获取板块K线数据（支持内存缓存和磁盘缓存）
-        通过行业指数获取板块K线数据
+        使用行业代码直接获取指数K线数据（基于 index_classify）
         """
         try:
             # 检查内存缓存
@@ -824,67 +962,44 @@ class DataFetcher:
                         self._sector_kline_cache[cache_key] = cached_kline
                     return cached_kline
             
-            # 通过行业指数获取板块K线数据
+            # 加载行业映射表（如果未加载）
+            if not self._industry_map_loaded:
+                self._load_industry_mapping()
+            
+            # 通过行业代码直接获取指数K线数据
             def fetch_sector_kline():
-                # 1. 获取行业指数列表
-                index_df = self.pro.index_basic(market='SW', fields='ts_code,name')
-                if index_df is None or index_df.empty:
-                    return None
-                
-                # 2. 查找匹配的行业指数（通过名称匹配）
-                # 优化匹配逻辑：先精确匹配，再模糊匹配
-                matched_index = None
                 sector_name_clean = sector_name.strip()
                 
-                # 精确匹配：板块名称完全匹配或包含在指数名称中（排除退市指数）
-                for _, row in index_df.iterrows():
-                    index_name = row['name']
-                    # 跳过退市指数
-                    if '退市' in index_name:
-                        continue
-                    if sector_name_clean in index_name or index_name in sector_name_clean:
-                        matched_index = row['ts_code']
-                        break
+                # 从映射表获取行业代码
+                with self._industry_map_lock:
+                    index_code = self._industry_index_map.get(sector_name_clean)
                 
-                # 如果没找到精确匹配，尝试模糊匹配
-                if matched_index is None:
-                    # 提取板块名称的关键词（去除常见后缀）
-                    keywords = sector_name_clean.replace('行业', '').replace('板块', '').strip()
-                    if len(keywords) >= 2:
+                # 如果映射表中没有，尝试直接匹配（兼容旧代码）
+                if not index_code:
+                    # 尝试获取行业指数列表并匹配
+                    index_df = self.pro.index_basic(market='SW', fields='ts_code,name')
+                    if index_df is not None and not index_df.empty:
                         for _, row in index_df.iterrows():
                             index_name = row['name']
-                            # 跳过退市指数
                             if '退市' in index_name:
                                 continue
-                            # 检查关键词是否在指数名称中
-                            if keywords in index_name or any(kw in index_name for kw in [keywords[:2], keywords[:3]] if len(kw) >= 2):
-                                matched_index = row['ts_code']
+                            if sector_name_clean in index_name or index_name in sector_name_clean:
+                                index_code = row['ts_code']
                                 break
                 
-                # 如果还是没找到，尝试使用行业名称的前几个字符匹配（排除退市指数）
-                if matched_index is None and len(sector_name_clean) >= 2:
-                    for _, row in index_df.iterrows():
-                        index_name = row['name']
-                        # 跳过退市指数
-                        if '退市' in index_name:
-                            continue
-                        if sector_name_clean[:2] in index_name or sector_name_clean[:3] in index_name:
-                            matched_index = row['ts_code']
-                            break
-                
-                if matched_index is None:
+                if not index_code:
                     return None
                 
-                # 3. 获取指数K线数据
+                # 获取指数K线数据
                 analysis_date = get_analysis_date()
                 start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
                 end_date = analysis_date.strftime('%Y%m%d')
                 
-                kline_df = self.pro.index_daily(ts_code=matched_index, start_date=start_date, end_date=end_date)
+                kline_df = self.pro.index_daily(ts_code=index_code, start_date=start_date, end_date=end_date)
                 if kline_df is None or kline_df.empty:
                     return None
                 
-                # 4. 格式化数据
+                # 格式化数据
                 kline_df.rename(columns={
                     'trade_date': 'date',
                     'open': 'open',

@@ -25,15 +25,9 @@ class CacheManager:
         self.cache_dir = cache_dir
         self._ensure_cache_dir()
         
-        # 统一的缓存目录结构
-        # 主目录：按数据类型分类
-        self.data_dirs = {
-            'kline': os.path.join(cache_dir, "data", "kline"),           # K线数据
-            'fundamental': os.path.join(cache_dir, "data", "fundamental"), # 基本面数据
-            'financial': os.path.join(cache_dir, "data", "financial"),    # 财务数据
-            'sectors': os.path.join(cache_dir, "data", "sectors"),        # 板块数据
-            'concepts': os.path.join(cache_dir, "data", "concepts"),      # 概念数据
-        }
+        # 统一的缓存目录结构（扁平化，只保留1级目录）
+        # K线数据目录（所有K线数据统一放在这里，包括股票、板块、概念的K线）
+        self.kline_cache_dir = os.path.join(cache_dir, "kline")
         
         # 元数据目录：存储汇总信息和集中存储文件（用于快速查询和兼容性）
         self.meta_dir = os.path.join(cache_dir, "meta")
@@ -46,20 +40,9 @@ class CacheManager:
         self.concepts_cache = os.path.join(self.meta_dir, "stock_concepts.xlsx")
         self.stock_list_cache = os.path.join(self.meta_dir, "stock_list.xlsx")
         
-        # 新版独立文件存储路径（优先使用）
-        self.kline_cache_dir = self.data_dirs['kline']
-        self.fundamental_cache_dir = self.data_dirs['fundamental']
-        self.financial_cache_dir = self.data_dirs['financial']
-        self.sectors_cache_dir = self.data_dirs['sectors']
-        self.concepts_cache_dir = self.data_dirs['concepts']
-        
         # 确保所有缓存目录存在
-        # 注意：fundamental 和 financial 目录不再自动创建（已迁移到 meta 目录下的集中文件）
-        # 只在需要时（修复损坏文件或读取旧数据）才创建
         required_dirs = [
-            self.data_dirs['kline'],
-            self.data_dirs['sectors'],
-            self.data_dirs['concepts'],
+            self.kline_cache_dir,
             self.meta_dir
         ]
         for cache_dir_path in required_dirs:
@@ -70,17 +53,17 @@ class CacheManager:
         self._cleanup_temp_files()
         
         # 缓存有效期（天数）
-        # 低频数据（财务、板块、概念）默认不刷新，只在首次加载时获取
+        # 说明：超过有效期后，缓存自动失效，会重新从API获取数据
         self.cache_valid_days = {
-            'fundamental': 7,      # 基本面数据7天
-            'financial': 7,        # 财务数据7天（低频，默认不刷新）
-            'sectors': 7,          # 板块信息7天（低频，默认不刷新）
-            'concepts': 7,         # 概念信息7天（低频，默认不刷新）
-            'stock_list': 1,       # 股票列表1天
-            'kline': 1,            # K线数据1天（当日缓存）
+            'fundamental': 7,      # 缓存有效期7天（超过7天自动失效）
+            'financial': 7,        # 缓存有效期7天（超过7天自动失效）
+            'sectors': 7,          # 缓存有效期7天（超过7天自动失效）
+            'concepts': 7,         # 缓存有效期7天（超过7天自动失效）
+            'stock_list': 1,       # 缓存有效期1天（超过1天自动失效）
+            'kline': 1,            # 缓存有效期1天（必须是今天，否则失效）
         }
         
-        # 定义哪些数据类型是低频的（默认不刷新）
+        # 定义哪些数据类型是低频的（变化频率低，但缓存失效后仍会重新获取）
         self.low_frequency_types = ['financial', 'sectors', 'concepts']
         
         # 文件级别的锁，防止并发写入导致文件句柄泄露（Windows上特别重要）
@@ -180,44 +163,14 @@ class CacheManager:
                     pass
                 return
             
-            # 尝试从独立文件恢复数据
-            if cache_type == 'fundamental':
-                cache_dir = self.fundamental_cache_dir
-            elif cache_type == 'financial':
-                cache_dir = self.financial_cache_dir
-            else:
-                return
-            
-            # 收集所有独立文件的数据
-            recovered_data = []
-            if os.path.exists(cache_dir):
-                for filename in os.listdir(cache_dir):
-                    if filename.endswith('.xlsx'):
-                        file_path = os.path.join(cache_dir, filename)
-                        try:
-                            df = pd.read_excel(file_path, engine='openpyxl')
-                            if not df.empty:
-                                recovered_data.append(df)
-                        except:
-                            # 跳过损坏的独立文件
-                            continue
-            
-            # 如果找到恢复的数据，重建集中文件
-            if recovered_data:
-                combined_df = pd.concat(recovered_data, ignore_index=True)
-                # 去重
-                if 'code' in combined_df.columns:
-                    combined_df = combined_df.drop_duplicates(subset=['code'], keep='last')
-                # 保存到集中文件
-                combined_df.to_excel(cache_file, index=False, engine='openpyxl')
-                print(f"已修复损坏的{cache_type}缓存文件，从独立文件恢复了{len(combined_df)}条数据")
-            else:
-                # 没有可恢复的数据，删除损坏文件
-                try:
+            # 已迁移到meta目录，不再使用独立文件恢复
+            # 如果文件损坏，直接删除，让程序重新创建
+            try:
+                if os.path.exists(cache_file):
                     os.remove(cache_file)
-                    print(f"已删除损坏的{cache_type}缓存文件（无数据可恢复）")
-                except:
-                    pass
+                    print(f"已删除损坏的{cache_type}缓存文件（将重新创建）")
+            except:
+                pass
         except Exception as e:
             # 修复失败，删除损坏文件
             try:
@@ -230,6 +183,7 @@ class CacheManager:
     def _is_data_valid(self, data: Dict, data_type: str) -> bool:
         """
         检查数据是否有效（关键指标不为空）
+        优化：区分0值（可能是正常值）和None值（数据缺失）
         Args:
             data: 数据字典
             data_type: 数据类型 ('fundamental', 'financial')
@@ -240,17 +194,20 @@ class CacheManager:
             return False
         
         if data_type == 'fundamental':
-            # 基本面数据：至少需要pe_ratio或pb_ratio之一有效
-            pe = data.get('pe_ratio', 0)
-            pb = data.get('pb_ratio', 0)
-            # 如果两个都是0或None，视为无效
-            if (pe == 0 or pe is None) and (pb == 0 or pb is None):
+            # 基本面数据：至少需要pe_ratio或pb_ratio之一有效（不为None）
+            # 改进：区分0值（可能是正常值，如亏损股的PE=0）和None值（数据缺失）
+            pe = data.get('pe_ratio')
+            pb = data.get('pb_ratio')
+            
+            # 如果两个都是None，视为无效（数据缺失）
+            # 如果至少有一个不是None（即使是0），视为有效
+            if pe is None and pb is None:
                 return False
             return True
         elif data_type == 'financial':
-            # 财务数据：至少需要roe有效
-            roe = data.get('roe', 0)
-            if roe == 0 or roe is None:
+            # 财务数据：至少需要roe有效（不为None）
+            roe = data.get('roe')
+            if roe is None:
                 return False
             return True
         
@@ -317,29 +274,8 @@ class CacheManager:
                     print(f"读取基本面集中缓存失败: {e}")
                     self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
         
-        # 方式2：从独立文件读取（兼容旧数据，逐步迁移到集中文件）
-        cache_file = os.path.join(self.fundamental_cache_dir, f"{stock_code}.xlsx")
-        if os.path.exists(cache_file) and self._is_cache_valid(cache_file, 'fundamental'):
-            try:
-                df = pd.read_excel(cache_file, engine='openpyxl')
-                if not df.empty:
-                    data = df.iloc[0].to_dict()
-                    # 验证数据有效性
-                    if self._is_data_valid(data, 'fundamental'):
-                        # 迁移到集中文件
-                        try:
-                            self.save_fundamental(stock_code, data)
-                        except:
-                            pass
-                        return data
-                    else:
-                        # 数据无效，删除缓存文件
-                        try:
-                            os.remove(cache_file)
-                        except:
-                            pass
-            except Exception as e:
-                print(f"读取基本面独立缓存失败 ({stock_code}): {e}")
+        # 方式2：从独立文件读取（兼容旧数据，已迁移到meta目录，不再使用）
+        # 旧数据已迁移到meta目录，不再读取独立文件
         
         return None
     
@@ -419,13 +355,7 @@ class CacheManager:
                             pass
                     raise e
                 
-                # 如果存在旧的独立文件，删除它（因为现在只使用集中文件）
-                cache_file = os.path.join(self.fundamental_cache_dir, f"{stock_code}.xlsx")
-                if os.path.exists(cache_file):
-                    try:
-                        os.remove(cache_file)
-                    except:
-                        pass
+                # 旧数据已迁移到meta目录，不再使用独立文件
             except Exception as e:
                 print(f"保存基本面缓存失败: {e}")
     
@@ -576,29 +506,8 @@ class CacheManager:
                     print(f"读取财务集中缓存失败: {e}")
                     self._repair_corrupted_cache(self.financial_cache, 'financial')
         
-        # 方式2：从独立文件读取（兼容旧数据，逐步迁移到集中文件）
-        cache_file = os.path.join(self.financial_cache_dir, f"{stock_code}.xlsx")
-        if os.path.exists(cache_file) and self._is_cache_valid(cache_file, 'financial'):
-            try:
-                df = pd.read_excel(cache_file, engine='openpyxl')
-                if not df.empty:
-                    data = df.iloc[0].to_dict()
-                    # 验证数据有效性
-                    if self._is_data_valid(data, 'financial'):
-                        # 迁移到集中文件
-                        try:
-                            self.save_financial(stock_code, data)
-                        except:
-                            pass
-                        return data
-                    else:
-                        # 数据无效，删除缓存文件
-                        try:
-                            os.remove(cache_file)
-                        except:
-                            pass
-            except Exception as e:
-                print(f"读取财务独立缓存失败 ({stock_code}): {e}")
+        # 方式2：从独立文件读取（兼容旧数据，已迁移到meta目录，不再使用）
+        # 旧数据已迁移到meta目录，不再读取独立文件
         
         return None
     
@@ -678,13 +587,7 @@ class CacheManager:
                             pass
                     raise e
                 
-                # 如果存在旧的独立文件，删除它（因为现在只使用集中文件）
-                cache_file = os.path.join(self.financial_cache_dir, f"{stock_code}.xlsx")
-                if os.path.exists(cache_file):
-                    try:
-                        os.remove(cache_file)
-                    except:
-                        pass
+                # 旧数据已迁移到meta目录，不再使用独立文件
             except Exception as e:
                 print(f"保存财务缓存失败: {e}")
     
@@ -1283,18 +1186,18 @@ class CacheManager:
         """
         # 清理symbol中的特殊字符，用于文件名
         safe_symbol = str(symbol).replace('/', '_').replace('\\', '_').replace(':', '_')
-        filename = f"{safe_symbol}_{period}.xlsx"
         
-        # 根据缓存类型选择正确的目录
-        if cache_type == 'sector':
-            cache_dir = self.sectors_cache_dir
+        # 所有K线数据统一放在kline目录下，通过文件名前缀区分类型
+        if cache_type == 'stock':
+            filename = f"stock_{safe_symbol}_{period}.xlsx"
+        elif cache_type == 'sector':
+            filename = f"sector_{safe_symbol}_{period}.xlsx"
         elif cache_type == 'concept':
-            cache_dir = self.concepts_cache_dir
-        else:  # 'stock' 或其他
-            cache_dir = self.kline_cache_dir
-            filename = f"{cache_type}_{safe_symbol}_{period}.xlsx"  # stock类型保留前缀
+            filename = f"concept_{safe_symbol}_{period}.xlsx"
+        else:
+            filename = f"{cache_type}_{safe_symbol}_{period}.xlsx"
         
-        return os.path.join(cache_dir, filename)
+        return os.path.join(self.kline_cache_dir, filename)
     
     def check_cache_completeness(self, stock_codes: List[str], 
                                 data_types: List[str] = None) -> Dict[str, Dict]:
@@ -1336,4 +1239,100 @@ class CacheManager:
             }
         
         return completeness
+    
+    def clear_cache(self, cache_type: str = None):
+        """
+        清除缓存
+        Args:
+            cache_type: 缓存类型，None表示清除所有
+                       'kline': 清除K线缓存
+                       'fundamental': 清除基本面缓存
+                       'financial': 清除财务缓存
+                       'sectors': 清除板块缓存
+                       'concepts': 清除概念缓存
+                       'stock_list': 清除股票列表缓存
+        """
+        if cache_type is None:
+            # 清除所有缓存
+            import shutil
+            try:
+                # 清除K线缓存
+                if os.path.exists(self.kline_cache_dir):
+                    for filename in os.listdir(self.kline_cache_dir):
+                        file_path = os.path.join(self.kline_cache_dir, filename)
+                        try:
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                        except:
+                            pass
+                
+                # 清除meta目录下的缓存文件
+                if os.path.exists(self.meta_dir):
+                    for filename in os.listdir(self.meta_dir):
+                        if filename.endswith('.xlsx'):
+                            file_path = os.path.join(self.meta_dir, filename)
+                            try:
+                                os.remove(file_path)
+                            except:
+                                pass
+                
+                print("已清除所有缓存")
+            except Exception as e:
+                print(f"清除缓存失败: {e}")
+        elif cache_type == 'kline':
+            # 清除K线缓存
+            try:
+                if os.path.exists(self.kline_cache_dir):
+                    for filename in os.listdir(self.kline_cache_dir):
+                        file_path = os.path.join(self.kline_cache_dir, filename)
+                        try:
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                        except:
+                            pass
+                print("已清除K线缓存")
+            except Exception as e:
+                print(f"清除K线缓存失败: {e}")
+        elif cache_type == 'fundamental':
+            # 清除基本面缓存
+            try:
+                if os.path.exists(self.fundamental_cache):
+                    os.remove(self.fundamental_cache)
+                print("已清除基本面缓存")
+            except Exception as e:
+                print(f"清除基本面缓存失败: {e}")
+        elif cache_type == 'financial':
+            # 清除财务缓存
+            try:
+                if os.path.exists(self.financial_cache):
+                    os.remove(self.financial_cache)
+                print("已清除财务缓存")
+            except Exception as e:
+                print(f"清除财务缓存失败: {e}")
+        elif cache_type == 'sectors':
+            # 清除板块缓存
+            try:
+                if os.path.exists(self.sectors_cache):
+                    os.remove(self.sectors_cache)
+                print("已清除板块缓存")
+            except Exception as e:
+                print(f"清除板块缓存失败: {e}")
+        elif cache_type == 'concepts':
+            # 清除概念缓存
+            try:
+                if os.path.exists(self.concepts_cache):
+                    os.remove(self.concepts_cache)
+                print("已清除概念缓存")
+            except Exception as e:
+                print(f"清除概念缓存失败: {e}")
+        elif cache_type == 'stock_list':
+            # 清除股票列表缓存
+            try:
+                if os.path.exists(self.stock_list_cache):
+                    os.remove(self.stock_list_cache)
+                print("已清除股票列表缓存")
+            except Exception as e:
+                print(f"清除股票列表缓存失败: {e}")
+        else:
+            print(f"未知的缓存类型: {cache_type}")
 

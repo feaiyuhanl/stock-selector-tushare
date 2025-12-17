@@ -24,8 +24,9 @@ class FundamentalScorer:
         scores = {}
         
         # 1. 市盈率评分（越低越好，但也要考虑行业）
-        pe_ratio = fundamental_data.get('pe_ratio', 0)
-        if pe_ratio and pe_ratio > 0:
+        pe_ratio = fundamental_data.get('pe_ratio')
+        # 改进：正确处理 None 值（数据缺失）和 0 值（可能是正常值，如亏损股）
+        if pe_ratio is not None and pe_ratio > 0:
             # PE在0-50之间给分，50以上递减
             if pe_ratio <= 20:
                 scores['pe_ratio'] = 100
@@ -35,12 +36,16 @@ class FundamentalScorer:
                 scores['pe_ratio'] = 60
             else:
                 scores['pe_ratio'] = max(0, 60 - (pe_ratio - 50) * 2)
+        elif pe_ratio == 0:
+            # PE为0可能是亏损股，给中等偏下分
+            scores['pe_ratio'] = 40
         else:
-            scores['pe_ratio'] = 50  # 无数据给中等分
+            scores['pe_ratio'] = 50  # 无数据（None）给中等分
         
         # 2. 市净率评分（越低越好）
-        pb_ratio = fundamental_data.get('pb_ratio', 0)
-        if pb_ratio and pb_ratio > 0:
+        pb_ratio = fundamental_data.get('pb_ratio')
+        # 改进：正确处理 None 值（数据缺失）和 0 值
+        if pb_ratio is not None and pb_ratio > 0:
             if pb_ratio <= 1:
                 scores['pb_ratio'] = 100
             elif pb_ratio <= 2:
@@ -51,8 +56,11 @@ class FundamentalScorer:
                 scores['pb_ratio'] = 40
             else:
                 scores['pb_ratio'] = max(0, 40 - (pb_ratio - 5) * 5)
+        elif pb_ratio == 0:
+            # PB为0可能是特殊情况，给中等偏下分
+            scores['pb_ratio'] = 40
         else:
-            scores['pb_ratio'] = 50
+            scores['pb_ratio'] = 50  # 无数据（None）给中等分
         
         # 3. ROE评分（越高越好）
         roe = financial_data.get('roe', 0)

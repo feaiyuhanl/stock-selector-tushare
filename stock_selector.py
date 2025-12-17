@@ -218,7 +218,6 @@ def _print_dimension_info(selector: StockSelector):
         'volume': '成交量评分',
         'price': '价格评分',
         'sector': '板块走势评分',
-        'concept': '概念走势评分'
     }
     
     dimension_details = {
@@ -226,7 +225,6 @@ def _print_dimension_info(selector: StockSelector):
         'volume': ['量比', '换手率', '成交量趋势'],
         'price': ['价格趋势', '价格位置', '波动率'],
         'sector': ['板块趋势', '相对强度'],
-        'concept': ['概念趋势', '相对强度']
     }
     
     print("\n【最终打分维度说明】")
@@ -258,8 +256,6 @@ def _print_dimension_info(selector: StockSelector):
                 print("    原因: 基本面数据（PE、PB）缺失或无效")
             elif dim_key == 'sector':
                 print("    原因: 板块K线数据缺失或不可用")
-            elif dim_key == 'concept':
-                print("    原因: 概念K线数据缺失或不可用")
     
     return used_dimensions, actual_weights, dimension_names
 
@@ -285,13 +281,11 @@ def _print_results(results: pd.DataFrame, selector: StockSelector):
     pd.set_option('display.width', None)
     pd.set_option('display.max_colwidth', 30)  # 限制列宽以便显示更多列
     
-    # 选择要显示的列（包含板块和概念）
+    # 选择要显示的列（包含板块）
     display_cols = ['code', 'name', 'score', 'fundamental_score', 'volume_score', 
-                    'price_score', 'sector_score', 'concept_score']
+                    'price_score', 'sector_score']
     if 'sectors' in results.columns:
         display_cols.append('sectors')
-    if 'concepts' in results.columns:
-        display_cols.append('concepts')
     
     available_cols = [col for col in display_cols if col in results.columns]
     print(results[available_cols].to_string(index=False))
@@ -304,16 +298,6 @@ def _print_results(results: pd.DataFrame, selector: StockSelector):
         for i, sector_info in enumerate(selector.strategy._top_sectors, 1):
             print(f"{i}. {sector_info['sector']}: 涨幅 {sector_info['trend']:.2f}% "
                   f"(涉及股票: {sector_info['stock_count']}只, 平均评分: {sector_info['avg_score']:.2f})")
-        print("=" * 60)
-    
-    # 显示热点概念
-    if hasattr(selector.strategy, '_hot_concepts') and selector.strategy._hot_concepts:
-        print("\n" + "=" * 60)
-        print("【热点概念TOP 10】")
-        print("-" * 60)
-        for i, concept_info in enumerate(selector.strategy._hot_concepts, 1):
-            print(f"{i}. {concept_info['concept']}: 平均评分 {concept_info['avg_score']:.2f} "
-                  f"(涉及股票: {concept_info['stock_count']}只, 热度: {concept_info['hot_score']:.3f})")
         print("=" * 60)
     
     # 显示评分公式
