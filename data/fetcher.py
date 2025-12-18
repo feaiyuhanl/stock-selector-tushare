@@ -192,6 +192,7 @@ class DataFetcher:
         self.batch_mode = False
         self.fundamental_batch = {}
         self.financial_batch = {}
+        self.sector_kline_batch = {}  # 批量保存板块K线缓存
         
         # 内存会话缓存
         self._spot_data_cache: Optional[pd.DataFrame] = None
@@ -220,7 +221,8 @@ class DataFetcher:
                 print("2. Token是否有效")
                 raise
         
-        self._load_stock_list()
+        # 优化：延迟加载股票列表，只在真正需要时加载（如调用get_all_stock_codes时）
+        # self._load_stock_list()  # 已移除立即加载
     
     def _init_tushare(self):
         """初始化tushare"""
@@ -635,6 +637,257 @@ class DataFetcher:
                 print(error_msg)
         return None
     
+    def batch_check_kline_cache_status(self, stock_codes: List[str], 
+                                       show_progress: bool = False) -> Dict[str, str]:
+        """
+        批量检查股票K线缓存状态
+        Args:
+            stock_codes: 股票代码列表
+            show_progress: 是否显示进度
+        Returns:
+            缓存状态字典 {stock_code: status}
+            status值: 'latest'=有最新缓存, 'outdated'=有旧缓存, 'missing'=无缓存
+        """
+        from tqdm import tqdm
+        
+        cache_status = {}
+        
+        if show_progress:
+            progress_bar = tqdm(total=len(stock_codes), desc="检查缓存状态", disable=False, leave=False)
+        else:
+            progress_bar = None
+        
+        for stock_code in stock_codes:
+            clean_code = self._format_stock_code(stock_code)
+            
+            # 检查是否有最新交易日数据
+            if not self.force_refresh and self.cache_manager.has_latest_trading_day_data(clean_code, 'stock', 'daily'):
+                cache_status[stock_code] = 'latest'
+            else:
+                # 检查是否有旧缓存
+                cached_kline = self.cache_manager.get_kline(clean_code, 'stock', 'daily', self.force_refresh)
+                if cached_kline is not None and not cached_kline.empty:
+                    cache_status[stock_code] = 'outdated'
+                else:
+                    cache_status[stock_code] = 'missing'
+            
+            if progress_bar:
+                progress_bar.update(1)
+        
+        if progress_bar:
+            progress_bar.close()
+        
+        # 统计
+        latest_count = sum(1 for status in cache_status.values() if status == 'latest')
+        outdated_count = sum(1 for status in cache_status.values() if status == 'outdated')
+        missing_count = sum(1 for status in cache_status.values() if status == 'missing')
+        
+        # 不在这个方法中打印，由调用方统一打印
+        # if show_progress:
+        #     print(f"缓存状态: 最新 {latest_count} 只 | 需更新 {outdated_count} 只 | 缺失 {missing_count} 只")
+        
+        return cache_status
+    
+    def batch_load_cached_kline(self, stock_codes: List[str], 
+                                show_progress: bool = False) -> Dict[str, pd.DataFrame]:
+        """
+        批量加载已缓存的K线数据到内存
+        Args:
+            stock_codes: 股票代码列表（只加载这些股票的缓存）
+            show_progress: 是否显示进度
+        Returns:
+            K线数据字典 {stock_code: kline_dataframe}
+        """
+        from tqdm import tqdm
+        
+        cached_data = {}
+        
+        if show_progress:
+            progress_bar = tqdm(total=len(stock_codes), desc="  进度", 
+                               bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                               disable=False, leave=False)
+        else:
+            progress_bar = None
+        
+        for stock_code in stock_codes:
+            clean_code = self._format_stock_code(stock_code)
+            
+            try:
+                # 从缓存加载
+                kline_data = self.cache_manager.get_kline(clean_code, 'stock', 'daily', False)
+                if kline_data is not None and not kline_data.empty:
+                    # 如果应该使用昨天的数据，过滤掉今天的数据
+                    use_yesterday = should_use_yesterday_data()
+                    if use_yesterday and 'date' in kline_data.columns:
+                        kline_data['date'] = pd.to_datetime(kline_data['date'])
+                        today = datetime.now().date()
+                        kline_data = kline_data[kline_data['date'].dt.date < today]
+                    
+                    if not kline_data.empty:
+                        cached_data[stock_code] = kline_data
+            except Exception as e:
+                if self.progress_callback:
+                    self.progress_callback('warning', f"加载 {stock_code} 缓存失败: {e}")
+            
+            if progress_bar:
+                progress_bar.update(1)
+        
+        if progress_bar:
+            progress_bar.close()
+        
+        return cached_data
+    
+    def batch_get_stock_kline(self, stock_codes: List[str], start_date: str = None, 
+                             end_date: str = None, show_progress: bool = False) -> Dict[str, pd.DataFrame]:
+        """
+        批量获取股票K线数据（使用按日期批量查询方式，大幅提升效率）
+        
+        优化说明：
+        - 传统方式：每只股票单独调用API，2184只股票需要2184次API调用
+        - 批量方式：按日期批量获取，120个交易日只需120次API调用，效率提升约18倍
+        
+        Args:
+            stock_codes: 股票代码列表
+            start_date: 开始日期，格式'YYYYMMDD'，None表示使用默认（最近120天）
+            end_date: 结束日期，格式'YYYYMMDD'，None表示使用默认（今天或昨天）
+            show_progress: 是否显示进度
+        Returns:
+            股票K线数据字典 {stock_code: kline_dataframe}
+        """
+        from tqdm import tqdm
+        
+        # 如果没有指定日期，使用默认日期范围
+        use_yesterday = should_use_yesterday_data()
+        analysis_date = get_analysis_date()
+        
+        if start_date is None:
+            start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
+        
+        if end_date is None:
+            if use_yesterday:
+                end_date_obj = analysis_date - timedelta(days=1)
+                while end_date_obj.weekday() >= 5:
+                    end_date_obj = end_date_obj - timedelta(days=1)
+                end_date = end_date_obj.strftime('%Y%m%d')
+            else:
+                end_date = analysis_date.strftime('%Y%m%d')
+        
+        # 获取交易日列表
+        def get_trading_dates(start: str, end: str) -> List[str]:
+            """获取交易日列表"""
+            try:
+                self._wait_before_request()
+                cal_df = self.pro.trade_cal(exchange='SSE', start_date=start, end_date=end, is_open=1)
+                if cal_df is not None and not cal_df.empty:
+                    return cal_df['cal_date'].tolist()
+                return []
+            except Exception as e:
+                if self.progress_callback:
+                    self.progress_callback('warning', f"获取交易日历失败: {e}")
+                return []
+        
+        trading_dates = get_trading_dates(start_date, end_date)
+        if not trading_dates:
+            if self.progress_callback:
+                self.progress_callback('error', "无法获取交易日列表，回退到单股票查询模式")
+            return {}
+        
+        # 准备股票代码映射（6位代码 -> ts_code格式）
+        stock_code_map = {}  # {6位代码: ts_code}
+        ts_code_to_clean = {}  # {ts_code: 6位代码}
+        for code in stock_codes:
+            clean_code = self._format_stock_code(code)
+            ts_code = self._get_ts_code(clean_code)
+            if ts_code:
+                stock_code_map[clean_code] = ts_code
+                ts_code_to_clean[ts_code] = clean_code
+        
+        if not stock_code_map:
+            return {}
+        
+        # 按日期批量获取数据
+        all_data_list = []
+        date_progress = tqdm(trading_dates, desc="  按日期获取", disable=not show_progress, leave=False)
+        
+        for trade_date in date_progress:
+            try:
+                self._wait_before_request()
+                
+                # 使用trade_date参数批量获取该日期的所有股票数据
+                df = self.pro.daily(trade_date=trade_date)
+                
+                if df is not None and not df.empty:
+                    # 只保留我们需要的股票
+                    df = df[df['ts_code'].isin(stock_code_map.values())]
+                    if not df.empty:
+                        all_data_list.append(df)
+                
+                date_progress.set_postfix({'已获取': len(all_data_list), '当前日期': trade_date})
+            except Exception as e:
+                if self.progress_callback:
+                    self.progress_callback('warning', f"获取日期 {trade_date} 的数据失败: {e}")
+                continue
+        
+        if show_progress:
+            date_progress.close()
+        
+        if not all_data_list:
+            if self.progress_callback:
+                self.progress_callback('warning', "批量获取未获取到任何数据")
+            return {}
+        
+        # 合并所有日期的数据
+        combined_df = pd.concat(all_data_list, ignore_index=True)
+        
+        # 重命名列
+        combined_df.rename(columns={
+            'trade_date': 'date',
+            'vol': 'volume',
+            'amount': 'turnover',
+            'pct_chg': 'pct_change',
+        }, inplace=True)
+        
+        # 转换日期格式
+        combined_df['date'] = pd.to_datetime(combined_df['date'], format='%Y%m%d')
+        
+        # 按股票代码分组
+        result_dict = {}
+        grouped = combined_df.groupby('ts_code')
+        
+        if show_progress:
+            stock_progress = tqdm(stock_code_map.items(), desc="  处理数据", disable=False, leave=False)
+        else:
+            stock_progress = stock_code_map.items()
+        
+        for clean_code, ts_code in stock_progress:
+            if ts_code in grouped.groups:
+                stock_df = grouped.get_group(ts_code).copy()
+                stock_df = stock_df.sort_values('date')
+                
+                # 添加换手率列（默认值，后续可以通过daily_basic批量获取）
+                stock_df['turnover_rate'] = 0
+                
+                # 确保必要的列存在
+                required_columns = ['date', 'open', 'close', 'high', 'low', 'volume']
+                for col in required_columns:
+                    if col not in stock_df.columns:
+                        stock_df[col] = 0
+                
+                # 如果应该使用昨天的数据，过滤掉今天的数据
+                if use_yesterday:
+                    today = datetime.now().date()
+                    stock_df = stock_df[stock_df['date'].dt.date < today]
+                
+                if not stock_df.empty:
+                    result_dict[clean_code] = stock_df[['date', 'open', 'close', 'high', 'low', 
+                                                        'volume', 'turnover', 'pct_change', 'turnover_rate']]
+        
+        # 不在这个方法中打印，由调用方统一打印
+        # if show_progress:
+        #     print(f"获取完成：成功 {len(result_dict)} 只")
+        
+        return result_dict
+    
     def _get_ts_code(self, stock_code: str) -> str:
         """
         获取tushare格式的股票代码（带市场后缀）
@@ -720,7 +973,7 @@ class DataFetcher:
                     }
                 return None
             
-            result = self._retry_request(fetch_fundamental, max_retries=2, timeout=15)
+            result = self._retry_request(fetch_fundamental, max_retries=3, timeout=15)
             
             if result:
                 # 保存到缓存
@@ -941,10 +1194,17 @@ class DataFetcher:
         self.cache_manager.save_stock_concepts(clean_code, [])
         return []
     
-    def get_sector_kline(self, sector_name: str, period: str = "daily") -> Optional[pd.DataFrame]:
+    def get_sector_kline(self, sector_name: str, period: str = "daily", 
+                        check_cache_only: bool = False) -> Optional[pd.DataFrame]:
         """
         获取板块K线数据（支持内存缓存和磁盘缓存）
         使用行业代码直接获取指数K线数据（基于 index_classify）
+        Args:
+            sector_name: 板块名称
+            period: 周期 ('daily', 'weekly', 'monthly')
+            check_cache_only: 如果为True，只检查缓存，不请求外部数据
+        Returns:
+            板块K线数据DataFrame，如果check_cache_only=True且缓存不存在则返回None
         """
         try:
             # 检查内存缓存
@@ -953,14 +1213,31 @@ class DataFetcher:
                 if cache_key in self._sector_kline_cache:
                     return self._sector_kline_cache[cache_key].copy()
             
-            # 检查磁盘缓存
+            # 检查磁盘缓存（优先检查是否有最新交易日数据）
             if not self.force_refresh:
-                cached_kline = self.cache_manager.get_kline(sector_name, 'sector', period, False)
-                if cached_kline is not None and not cached_kline.empty:
-                    # 存入内存缓存
-                    with self._cache_lock:
-                        self._sector_kline_cache[cache_key] = cached_kline
-                    return cached_kline
+                # 先检查是否有最新交易日数据（快速检查）
+                if self.cache_manager.has_latest_trading_day_data(sector_name, 'sector', period):
+                    cached_kline = self.cache_manager.get_kline(sector_name, 'sector', period, False)
+                    if cached_kline is not None and not cached_kline.empty:
+                        # 存入内存缓存
+                        with self._cache_lock:
+                            self._sector_kline_cache[cache_key] = cached_kline
+                        return cached_kline
+                else:
+                    # 检查是否有旧缓存（用于增量更新）
+                    cached_kline = self.cache_manager.get_kline(sector_name, 'sector', period, False)
+                    if cached_kline is not None and not cached_kline.empty:
+                        # 存入内存缓存（但标记为需要更新）
+                        with self._cache_lock:
+                            self._sector_kline_cache[cache_key] = cached_kline
+                        # 如果只检查缓存，直接返回旧缓存
+                        if check_cache_only:
+                            return cached_kline
+                        # 否则继续，准备增量更新
+            
+            # 如果只检查缓存，且缓存不存在，返回None
+            if check_cache_only:
+                return None
             
             # 加载行业映射表（如果未加载）
             if not self._industry_map_loaded:
@@ -988,15 +1265,52 @@ class DataFetcher:
                                 break
                 
                 if not index_code:
+                    if self.progress_callback:
+                        self.progress_callback('warning', f"板块 '{sector_name}': 未找到对应的指数代码")
                     return None
                 
-                # 获取指数K线数据
+                # 获取指数K线数据（支持增量更新）
                 analysis_date = get_analysis_date()
-                start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
                 end_date = analysis_date.strftime('%Y%m%d')
                 
-                kline_df = self.pro.index_daily(ts_code=index_code, start_date=start_date, end_date=end_date)
-                if kline_df is None or kline_df.empty:
+                # 检查是否有旧缓存，用于增量更新
+                cached_latest_date = None
+                if not self.force_refresh:
+                    cached_kline = self.cache_manager.get_kline(sector_name, 'sector', period, False)
+                    if cached_kline is not None and not cached_kline.empty and 'date' in cached_kline.columns:
+                        cached_kline['date'] = pd.to_datetime(cached_kline['date'])
+                        cached_latest_date = cached_kline['date'].max()
+                
+                # 确定起始日期
+                if cached_latest_date is not None:
+                    # 从缓存最新日期的下一天开始（增量更新）
+                    start_date_obj = cached_latest_date + timedelta(days=1)
+                    # 如果下一天是周末，跳到下一个工作日
+                    while start_date_obj.weekday() >= 5:
+                        start_date_obj = start_date_obj + timedelta(days=1)
+                    start_date = start_date_obj.strftime('%Y%m%d')
+                    
+                    # 如果start_date >= end_date，说明缓存已是最新，直接返回缓存
+                    if start_date >= end_date:
+                        return cached_kline if cached_kline is not None else None
+                else:
+                    # 没有缓存，获取最近120天的数据
+                    start_date = (analysis_date - timedelta(days=120)).strftime('%Y%m%d')
+                
+                try:
+                    kline_df = self.pro.index_daily(ts_code=index_code, start_date=start_date, end_date=end_date)
+                    if kline_df is None or kline_df.empty:
+                        if self.progress_callback:
+                            self.progress_callback('warning', f"板块 '{sector_name}' (指数代码: {index_code}): index_daily返回空数据")
+                        return None
+                except Exception as e:
+                    error_msg = str(e)
+                    if self.progress_callback:
+                        self.progress_callback('error', f"板块 '{sector_name}' (指数代码: {index_code}): index_daily调用失败 - {error_msg[:100]}")
+                    # 检查是否是权限问题
+                    if '权限' in error_msg or '积分' in error_msg or 'token' in error_msg.lower():
+                        if self.progress_callback:
+                            self.progress_callback('error', f"板块 '{sector_name}': index_daily可能需要更高积分或权限（当前积分: 2100）")
                     return None
                 
                 # 格式化数据
@@ -1023,18 +1337,46 @@ class DataFetcher:
             sector_kline = self._retry_request(fetch_sector_kline, max_retries=2, timeout=20)
             
             if sector_kline is not None and not sector_kline.empty:
+                # 增量更新：如果有旧缓存，合并新旧数据
+                if not self.force_refresh:
+                    cached_kline = self.cache_manager.get_kline(sector_name, 'sector', period, False)
+                    if cached_kline is not None and not cached_kline.empty and not sector_kline.empty:
+                        if 'date' in sector_kline.columns and 'date' in cached_kline.columns:
+                            sector_kline['date'] = pd.to_datetime(sector_kline['date'])
+                            cached_kline['date'] = pd.to_datetime(cached_kline['date'])
+                            # 合并：保留旧数据，追加新数据
+                            combined_kline = pd.concat([cached_kline, sector_kline], ignore_index=True)
+                            # 按日期排序并去重（保留最新的）
+                            combined_kline = combined_kline.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+                            sector_kline = combined_kline
+                
                 # 存入内存缓存
                 with self._cache_lock:
                     self._sector_kline_cache[cache_key] = sector_kline
-                # 保存到磁盘缓存
-                self.cache_manager.save_kline(sector_name, sector_kline, 'sector', period, incremental=True)
+                
+                # 批量模式：收集到批量缓存中，稍后统一保存
+                if self.batch_mode:
+                    with self._batch_lock:
+                        self.sector_kline_batch[sector_name] = {
+                            'data': sector_kline,
+                            'period': period
+                        }
+                else:
+                    # 立即保存到磁盘缓存
+                    self.cache_manager.save_kline(sector_name, sector_kline, 'sector', period, incremental=True)
+                
                 return sector_kline
             
         except Exception as e:
+            error_msg = str(e)
             if self.progress_callback:
-                self.progress_callback('info', f"获取板块 {sector_name} K线数据失败: {e}")
+                self.progress_callback('error', f"获取板块 {sector_name} K线数据失败: {error_msg[:100]}")
             else:
-                print(f"获取板块 {sector_name} K线数据失败: {e}")
+                print(f"获取板块 {sector_name} K线数据失败: {error_msg}")
+            # 检查是否是权限或积分问题
+            if '权限' in error_msg or '积分' in error_msg or 'token' in error_msg.lower():
+                if self.progress_callback:
+                    self.progress_callback('error', f"提示: index_daily接口可能需要2000积分以上，请检查Tushare积分和权限")
         return None
     
     def get_concept_kline(self, concept_name: str, period: str = "daily") -> Optional[pd.DataFrame]:
@@ -1198,6 +1540,10 @@ class DataFetcher:
         Returns:
             股票代码列表
         """
+        # 优化：延迟加载股票列表（按需加载）
+        if self.stock_list is None or self.stock_list.empty:
+            self._load_stock_list()
+        
         if self.stock_list is not None and not self.stock_list.empty:
             if board_types is None:
                 return self.stock_list['code'].tolist()
@@ -1209,6 +1555,8 @@ class DataFetcher:
     
     def flush_batch_cache(self):
         """刷新批量缓存（将收集的数据批量保存）"""
+        total_count = 0
+        
         try:
             with self._batch_lock:
                 if self.fundamental_batch:
@@ -1219,11 +1567,9 @@ class DataFetcher:
             
             if batch_to_save:
                 self.cache_manager.batch_save_fundamental(batch_to_save)
-            
-            count = len(batch_to_save)
+                total_count += len(batch_to_save)
         except Exception as e:
             print(f"批量保存基本面缓存失败: {e}")
-            count = 0
         
         try:
             with self._batch_lock:
@@ -1235,12 +1581,36 @@ class DataFetcher:
             
             if batch_to_save:
                 self.cache_manager.batch_save_financial(batch_to_save)
-            
-            count += len(batch_to_save)
+                total_count += len(batch_to_save)
         except Exception as e:
             print(f"批量保存财务缓存失败: {e}")
         
-        return count
+        # 批量保存板块K线缓存
+        try:
+            with self._batch_lock:
+                if self.sector_kline_batch:
+                    batch_to_save = self.sector_kline_batch.copy()
+                    self.sector_kline_batch.clear()
+                else:
+                    batch_to_save = {}
+            
+            if batch_to_save:
+                for sector_name, sector_info in batch_to_save.items():
+                    try:
+                        self.cache_manager.save_kline(
+                            sector_name, 
+                            sector_info['data'], 
+                            'sector', 
+                            sector_info['period'], 
+                            incremental=True
+                        )
+                        total_count += 1
+                    except Exception as e:
+                        print(f"批量保存板块 {sector_name} K线缓存失败: {e}")
+        except Exception as e:
+            print(f"批量保存板块K线缓存失败: {e}")
+        
+        return total_count
     
     def preload_stock_data(self, stock_codes: List[str], data_types: List[str] = None,
                           max_workers: int = 5, show_progress: bool = True) -> Dict[str, Dict]:
@@ -1396,6 +1766,133 @@ class DataFetcher:
             print("=" * 60)
         
         return stats
+    
+    def batch_preload_sector_kline(self, sector_names: List[str], period: str = "daily",
+                                   max_workers: int = 5, show_progress: bool = True) -> Dict[str, pd.DataFrame]:
+        """
+        批量预加载板块K线数据（优化：先检查缓存，缓存不存在或过期才请求）
+        Args:
+            sector_names: 板块名称列表
+            period: 周期 ('daily', 'weekly', 'monthly')
+            max_workers: 最大线程数
+            show_progress: 是否显示进度
+        Returns:
+            板块K线数据字典 {sector_name: kline_data}
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from tqdm import tqdm
+        
+        if not sector_names:
+            return {}
+        
+        # 去重
+        unique_sectors = list(set(sector_names))
+        total = len(unique_sectors)
+        
+        if show_progress:
+            print(f"\n开始批量预加载 {total} 个板块的K线数据...")
+            print("=" * 60)
+        
+        # 步骤1: 先批量检查缓存，收集需要请求的板块
+        sectors_to_fetch = []
+        sector_kline_results = {}
+        
+        if show_progress:
+            print("步骤1: 检查板块K线缓存...")
+        
+        for sector_name in unique_sectors:
+            # 先检查缓存（不请求外部数据）
+            cached_kline = self.get_sector_kline(sector_name, period, check_cache_only=True)
+            if cached_kline is not None and not cached_kline.empty:
+                # 检查是否有最新交易日数据
+                if self.cache_manager.has_latest_trading_day_data(sector_name, 'sector', period):
+                    sector_kline_results[sector_name] = cached_kline
+                    if show_progress:
+                        print(f"  ✓ {sector_name}: 使用缓存数据")
+                else:
+                    # 缓存过期，需要更新
+                    sectors_to_fetch.append(sector_name)
+                    if show_progress:
+                        print(f"  ⚠ {sector_name}: 缓存过期，需要更新")
+            else:
+                # 缓存不存在，需要请求
+                sectors_to_fetch.append(sector_name)
+                if show_progress:
+                    print(f"  ✗ {sector_name}: 缓存不存在，需要请求")
+        
+        cached_count = len(sector_kline_results)
+        fetch_count = len(sectors_to_fetch)
+        
+        if show_progress:
+            print(f"\n缓存统计: 已缓存 {cached_count} 个，需要请求 {fetch_count} 个")
+            print("=" * 60)
+        
+        # 步骤2: 批量请求需要更新的板块K线数据
+        if sectors_to_fetch:
+            if show_progress:
+                print(f"\n步骤2: 批量请求 {fetch_count} 个板块的K线数据...")
+                print("=" * 60)
+            
+            # 启用批量模式
+            self.batch_mode = True
+            
+            def fetch_single_sector(sector_name: str) -> tuple:
+                """获取单个板块的K线数据"""
+                try:
+                    kline = self.get_sector_kline(sector_name, period, check_cache_only=False)
+                    if kline is not None and not kline.empty:
+                        return (sector_name, kline, True)
+                    else:
+                        return (sector_name, None, False)
+                except Exception as e:
+                    if show_progress:
+                        print(f"  获取板块 {sector_name} K线失败: {e}")
+                    return (sector_name, None, False)
+            
+            # 使用线程池并行请求
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(fetch_single_sector, sector): sector 
+                          for sector in sectors_to_fetch}
+                
+                if show_progress:
+                    pbar = tqdm(total=len(sectors_to_fetch), desc="板块K线请求进度",
+                               bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                
+                success_count = 0
+                for future in as_completed(futures):
+                    sector_name, kline, success = future.result()
+                    if success and kline is not None:
+                        sector_kline_results[sector_name] = kline
+                        success_count += 1
+                    if show_progress:
+                        pbar.update(1)
+                
+                if show_progress:
+                    pbar.close()
+            
+            # 批量保存板块K线缓存
+            if show_progress:
+                print(f"\n步骤3: 批量保存板块K线缓存...")
+            
+            saved_count = self.flush_batch_cache()
+            self.batch_mode = False
+            
+            if show_progress:
+                print(f"  已保存 {saved_count} 个板块的K线缓存")
+        else:
+            if show_progress:
+                print("\n所有板块K线数据都已缓存，无需请求")
+        
+        if show_progress:
+            print("\n" + "=" * 60)
+            print(f"板块K线预加载完成！")
+            print(f"  总计: {total} 个板块")
+            print(f"  已缓存: {cached_count} 个")
+            print(f"  新请求: {fetch_count} 个")
+            print(f"  成功: {len(sector_kline_results)} 个")
+            print("=" * 60)
+        
+        return sector_kline_results
     
     def ensure_data_ready(self, stock_codes: List[str], board_types: List[str] = None,
                         max_workers: int = 10, min_coverage: float = 0.5) -> bool:

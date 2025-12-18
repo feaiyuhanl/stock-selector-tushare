@@ -12,7 +12,6 @@ from scorers import (
     FundamentalScorer,
     VolumeScorer,
     PriceScorer,
-    SectorScorer
 )
 
 
@@ -31,7 +30,6 @@ class ScoringStrategy(BaseStrategy):
         self.fundamental_scorer = FundamentalScorer()
         self.volume_scorer = VolumeScorer()
         self.price_scorer = PriceScorer()
-        self.sector_scorer = SectorScorer()
         self.weights = config.WEIGHT_CONFIG
     
     def evaluate_stock(self, stock_code: str, stock_name: str = "", 
@@ -72,44 +70,21 @@ class ScoringStrategy(BaseStrategy):
             if financial_data is None:
                 financial_data = {}
             
-            # 4. 获取板块信息（带缓存）
-            if progress_callback:
-                progress_callback('loading', f"{stock_code} {stock_name}: 获取板块信息...")
-            sectors = self.data_fetcher.get_stock_sectors(stock_code)
-            
-            # 5. 获取板块K线数据（实时数据，不缓存）
-            # 优化：减少板块K线获取，只取1个最重要的板块，避免过多请求
-            sector_kline_list = []
-            if sectors:
-                try:
-                    sector_kline = self.data_fetcher.get_sector_kline(sectors[0])  # 只取第一个板块
-                    if sector_kline is not None and not sector_kline.empty:
-                        sector_kline_list.append(sector_kline)
-                    elif progress_callback:
-                        progress_callback('info', f"{stock_code} {stock_name}: 板块 '{sectors[0]}' K线数据获取失败或为空")
-                except Exception as e:
-                    if progress_callback:
-                        progress_callback('info', f"{stock_code} {stock_name}: 板块K线获取异常: {str(e)[:50]}")
-            elif progress_callback:
-                progress_callback('info', f"{stock_code} {stock_name}: 无板块信息")
-            
-            # 6. 计算各维度得分
+            # 4. 计算各维度得分
             if progress_callback:
                 progress_callback('loading', f"{stock_code} {stock_name}: 计算评分...")
             fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
             volume_score = self.volume_scorer.score(kline_data)
             price_score = self.price_scorer.score(kline_data)
-            sector_score = self.sector_scorer.score(sector_kline_list, kline_data)
             
-            # 7. 计算综合得分
+            # 5. 计算综合得分
             total_score = (
                 fundamental_score * self.weights['fundamental'] +
                 volume_score * self.weights['volume'] +
-                price_score * self.weights['price'] +
-                sector_score * self.weights['sector']
+                price_score * self.weights['price']
             )
             
-            # 8. 获取当前价格信息
+            # 6. 获取当前价格信息
             current_price = kline_data['close'].iloc[-1] if not kline_data.empty else 0
             current_volume = kline_data['volume'].iloc[-1] if not kline_data.empty else 0
             
@@ -121,15 +96,11 @@ class ScoringStrategy(BaseStrategy):
                 'fundamental_score': round(fundamental_score, 2),
                 'volume_score': round(volume_score, 2),
                 'price_score': round(price_score, 2),
-                'sector_score': round(sector_score, 2),
                 'current_price': round(current_price, 2),
                 'current_volume': current_volume,
                 'pe_ratio': fundamental_data.get('pe_ratio', 0),
                 'pb_ratio': fundamental_data.get('pb_ratio', 0),
                 'roe': financial_data.get('roe', 0),
-                'sectors': sectors,  # 添加板块信息，方便调试
-                'sector_count': len(sectors),  # 板块数量
-                'has_sector_kline': len(sector_kline_list) > 0,  # 是否有板块K线数据
             }
             
             if progress_callback:
@@ -154,20 +125,127 @@ class ScoringStrategy(BaseStrategy):
             stock_name_map: 股票名称映射字典
             max_workers: 最大线程数
         Returns:
-            预加载的数据字典，格式为 {stock_code: {kline_data, fundamental_data, financial_data, sectors, sector_kline_list}}
+            预加载的数据字典，格式为 {stock_code: {kline_data, fundamental_data, financial_data}}
         """
         preloaded_data = {}
         total = len(stock_codes)
         
-        print(f"\n开始预加载 {total} 只股票的数据（使用 {max_workers} 个线程）...")
-        print("=" * 60)
+        batch_kline_data = {}
+        
+        # 阶段1：数据准备
+        print("\n【阶段1】数据准备")
+        print(f"  股票总数: {total} 只")
+        
+        if total >= 50:  # 超过50只股票时使用优化方案
+            try:
+                # 批量检查缓存状态
+                print("  检查缓存状态...", end="", flush=True)
+                cache_status = self.data_fetcher.batch_check_kline_cache_status(
+                    stock_codes, 
+                    show_progress=False  # 不显示进度条，只显示结果
+                )
+                
+                # 分类股票
+                latest_stocks = [code for code, status in cache_status.items() if status == 'latest']
+                outdated_stocks = [code for code, status in cache_status.items() if status == 'outdated']
+                missing_stocks = [code for code, status in cache_status.items() if status == 'missing']
+                
+                latest_count = len(latest_stocks)
+                outdated_count = len(outdated_stocks)
+                missing_count = len(missing_stocks)
+                
+                print(f" ✓ 完成")
+                print(f"  缓存状态: 最新 {latest_count} 只 | 需更新 {outdated_count} 只 | 缺失 {missing_count} 只")
+                
+                # 批量加载已有最新缓存的股票数据
+                if latest_stocks:
+                    print(f"  加载最新缓存数据 ({latest_count} 只)...")
+                    cached_kline_data = self.data_fetcher.batch_load_cached_kline(
+                        latest_stocks,
+                        show_progress=True  # 显示进度
+                    )
+                    batch_kline_data.update(cached_kline_data)
+                    print(f"  ✓ 完成: 成功加载 {len(cached_kline_data)} 只股票的缓存数据")
+                
+                # 批量获取需要更新的股票（旧缓存+无缓存）
+                stocks_to_fetch = outdated_stocks + missing_stocks
+                if stocks_to_fetch:
+                    try:
+                        print(f"  获取K线数据 ({len(stocks_to_fetch)} 只)...")
+                        fetched_kline_data = self.data_fetcher.batch_get_stock_kline(
+                            stocks_to_fetch,
+                            show_progress=True
+                        )
+                        
+                        # 对于有旧缓存的股票，需要合并新旧数据（增量更新）
+                        # 注意：batch_get_stock_kline 返回的字典键是 clean_code（已格式化的6位代码）
+                        for stock_code in outdated_stocks:
+                            clean_code = self.data_fetcher._format_stock_code(stock_code)
+                            # 注意：fetched_kline_data 的键是 clean_code，不是原始的 stock_code
+                            if clean_code in fetched_kline_data:
+                                new_data = fetched_kline_data[clean_code]
+                                # 获取旧缓存数据
+                                old_data = self.data_fetcher.cache_manager.get_kline(
+                                    clean_code, 'stock', 'daily', False
+                                )
+                                if old_data is not None and not old_data.empty:
+                                    # 合并新旧数据
+                                    old_data = old_data.copy()
+                                    old_data['date'] = pd.to_datetime(old_data['date'])
+                                    new_data = new_data.copy()
+                                    new_data['date'] = pd.to_datetime(new_data['date'])
+                                    # 合并：旧数据 + 新数据，按日期去重（保留新数据）
+                                    combined = pd.concat([old_data, new_data], ignore_index=True)
+                                    combined = combined.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+                                    fetched_kline_data[clean_code] = combined
+                        
+                        # 将 fetched_kline_data 的键转换为原始 stock_code，以便后续使用
+                        # 但保存时需要使用 clean_code
+                        for clean_code, kline_df in fetched_kline_data.items():
+                            # 找到对应的原始 stock_code（用于 batch_kline_data）
+                            original_code = None
+                            for sc in stocks_to_fetch:
+                                if self.data_fetcher._format_stock_code(sc) == clean_code:
+                                    original_code = sc
+                                    break
+                            if original_code:
+                                batch_kline_data[original_code] = kline_df
+                        
+                        # 批量保存新获取的K线缓存
+                        saved_count = 0
+                        for clean_code, kline_df in fetched_kline_data.items():
+                            if kline_df is not None and not kline_df.empty:
+                                # clean_code 已经是格式化后的6位代码，直接使用
+                                self.data_fetcher.cache_manager.save_kline(
+                                    clean_code, kline_df, 'stock', 'daily', incremental=True
+                                )
+                                saved_count += 1
+                        
+                        # 统计批量获取的结果
+                        fetched_count = len(fetched_kline_data)
+                        print(f"  ✓ 获取完成: 成功 {fetched_count} 只")
+                    except Exception as e:
+                        print(f"  ✗ 批量获取失败: {e}")
+                        print("  将回退到单股票查询模式")
+                        fetched_count = 0  # 标记为已处理，避免重复处理
+            except Exception as e:
+                print(f"  ✗ 批量加载流程失败: {e}")
+                print("  将回退到单股票查询模式")
+                batch_kline_data = {}
         
         def preload_single_stock(stock_code: str) -> tuple:
             """预加载单只股票的数据（用于多线程）"""
             stock_name = stock_name_map.get(stock_code, "")
             try:
-                # 1. 获取K线数据
-                kline_data = self.data_fetcher.get_stock_kline(stock_code)
+                # 1. 获取K线数据（优先使用批量加载的数据）
+                kline_data = None
+                if stock_code in batch_kline_data:
+                    # 使用批量加载的K线数据
+                    kline_data = batch_kline_data[stock_code]
+                else:
+                    # 批量加载中不存在，使用单股票查询（可能已缓存）
+                    kline_data = self.data_fetcher.get_stock_kline(stock_code)
+                
                 if kline_data is None or kline_data.empty:
                     return (stock_code, None)
                 
@@ -181,26 +259,10 @@ class ScoringStrategy(BaseStrategy):
                 if financial_data is None:
                     financial_data = {}
                 
-                # 4. 获取板块信息（带缓存）
-                sectors = self.data_fetcher.get_stock_sectors(stock_code)
-                
-                # 5. 获取板块K线数据（实时数据，不缓存）
-                sector_kline_list = []
-                if sectors:
-                    try:
-                        sector_kline = self.data_fetcher.get_sector_kline(sectors[0])
-                        if sector_kline is not None and not sector_kline.empty:
-                            sector_kline_list.append(sector_kline)
-                    except Exception as e:
-                        # 板块K线获取失败不影响评分，静默处理
-                        pass
-                
                 data = {
                     'kline_data': kline_data,
                     'fundamental_data': fundamental_data,
                     'financial_data': financial_data,
-                    'sectors': sectors,
-                    'sector_kline_list': sector_kline_list,
                     'stock_name': stock_name
                 }
                 
@@ -242,6 +304,10 @@ class ScoringStrategy(BaseStrategy):
             'total': total
         }
         
+        # 阶段2：数据加载
+        print("\n【阶段2】数据加载")
+        print(f"  加载股票数据 ({total} 只)...")
+        
         # 使用线程池并行处理，带详细进度显示
         try:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -249,9 +315,9 @@ class ScoringStrategy(BaseStrategy):
                           for code in stock_codes}
                 
                 # 使用tqdm显示进度
-                pbar = tqdm(total=total, desc="数据预加载进度", 
+                pbar = tqdm(total=total, desc="  进度", 
                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] 成功:{postfix[0]} 失败:{postfix[1]}',
-                           postfix=[0, 0])
+                           postfix=[0, 0], leave=False)
                 
                 completed = 0
                 
@@ -281,29 +347,19 @@ class ScoringStrategy(BaseStrategy):
                         
                         # 更新进度条
                         pbar.postfix = [stats['success'], stats['failed']]
-                        pbar.set_description(f"数据预加载进度 - 当前: {stock_code_result} {stock_name[:10]}")
                         pbar.update(1)
                         
-                        # 每10个显示一次详细信息
-                        if completed % 10 == 0:
-                            print(f"\n进度: {completed+1}/{total} | 成功: {stats['success']} | 失败: {stats['failed']} | {status_msg}")
-                        
-                        # 批量保存缓存（每10只股票保存一次）
+                        # 批量保存缓存（每10只股票保存一次，静默保存）
                         if completed > 0 and completed % batch_cache_size == 0:
                             try:
-                                saved_count = self.data_fetcher.flush_batch_cache()
-                                if saved_count > 0:
-                                    print(f"\n[缓存更新] 已批量保存 {saved_count} 只股票的缓存数据")
+                                self.data_fetcher.flush_batch_cache()
                             except Exception as e:
-                                print(f"\n[警告] 批量保存缓存失败: {e}")
+                                pass  # 静默失败，不影响主流程
                         
                     except FutureTimeoutError:
                         stats['failed'] += 1
-                        error_msg = f"✗ {stock_code} {stock_name}: 超时（>30秒）"
                         pbar.postfix = [stats['success'], stats['failed']]
                         pbar.update(1)
-                        if completed % 10 == 0:
-                            print(f"\n进度: {completed+1}/{total} | 成功: {stats['success']} | 失败: {stats['failed']} | {error_msg}")
                     except KeyboardInterrupt:
                         # 设置中断标志
                         interrupt_flag.set()
@@ -311,11 +367,8 @@ class ScoringStrategy(BaseStrategy):
                         break
                     except Exception as e:
                         stats['failed'] += 1
-                        error_msg = f"✗ {stock_code} {stock_name}: 异常 - {str(e)[:50]}"
                         pbar.postfix = [stats['success'], stats['failed']]
                         pbar.update(1)
-                        if completed % 10 == 0:
-                            print(f"\n进度: {completed+1}/{total} | 成功: {stats['success']} | 失败: {stats['failed']} | {error_msg}")
                     
                     completed += 1
                 
@@ -331,30 +384,81 @@ class ScoringStrategy(BaseStrategy):
         finally:
             # 确保无论是否异常都会保存缓存并关闭批量模式
             try:
-                saved_count = self.data_fetcher.flush_batch_cache()
-                if saved_count > 0:
-                    print(f"\n[缓存更新] 已保存剩余 {saved_count} 只股票的缓存数据")
+                self.data_fetcher.flush_batch_cache()
             except Exception as e:
-                print(f"\n[警告] 保存剩余缓存失败: {e}")
+                pass  # 静默失败，不影响主流程
             finally:
                 # 关闭批量模式
                 self.data_fetcher.batch_mode = False
         
         # 显示预加载统计（只有在未中断时显示）
         if not interrupt_flag.is_set():
-            print("\n" + "=" * 60)
-            print(f"数据预加载完成！")
-            print(f"总计: {stats['total']} 只股票")
-            print(f"成功: {stats['success']} 只 ({stats['success']/stats['total']*100:.1f}%)")
-            print(f"失败: {stats['failed']} 只 ({stats['failed']/stats['total']*100:.1f}%)")
-            print("=" * 60)
+            print(f"  ✓ 加载完成: 成功 {stats['success']}/{stats['total']} ({stats['success']/stats['total']*100:.1f}%)")
         else:
-            print("\n" + "=" * 60)
-            print(f"数据预加载被中断")
-            print(f"已处理: {completed}/{stats['total']} 只股票")
-            print(f"成功: {stats['success']} 只")
-            print(f"失败: {stats['failed']} 只")
-            print("=" * 60)
+            print(f"  ✗ 加载被中断: 已处理 {completed}/{stats['total']} (成功 {stats['success']}, 失败 {stats['failed']})")
+        
+        # 二次重试：对缺失基本面和财务数据的股票进行重试
+        if not interrupt_flag.is_set() and len(preloaded_data) > 0:
+            retry_stocks = []
+            for stock_code, data in preloaded_data.items():
+                if data is None:
+                    continue
+                fundamental_data = data.get('fundamental_data', {})
+                financial_data = data.get('financial_data', {})
+                
+                # 检查基本面数据是否缺失
+                pe_ratio = fundamental_data.get('pe_ratio')
+                pb_ratio = fundamental_data.get('pb_ratio')
+                fundamental_missing = (pe_ratio is None and pb_ratio is None)
+                
+                # 检查财务数据是否缺失
+                roe = financial_data.get('roe')
+                financial_missing = (roe is None)
+                
+                # 如果基本面和财务数据都缺失，加入重试列表
+                if fundamental_missing or financial_missing:
+                    retry_stocks.append((stock_code, fundamental_missing, financial_missing))
+            
+            if retry_stocks:
+                retry_count = len(retry_stocks)
+                print(f"\n【二次重试】对 {retry_count} 只缺失数据的股票进行重试...")
+                retry_success = 0
+                
+                for stock_code, need_fundamental, need_financial in retry_stocks:
+                    try:
+                        stock_name = stock_name_map.get(stock_code, "")
+                        data = preloaded_data.get(stock_code)
+                        if data is None:
+                            continue
+                        
+                        # 重试获取基本面数据
+                        if need_fundamental:
+                            retry_fundamental = self.data_fetcher.get_stock_fundamental(stock_code)
+                            if retry_fundamental is not None:
+                                data['fundamental_data'] = retry_fundamental
+                                retry_success += 1
+                        
+                        # 重试获取财务数据
+                        if need_financial:
+                            retry_financial = self.data_fetcher.get_stock_financial(stock_code)
+                            if retry_financial is not None:
+                                data['financial_data'] = retry_financial
+                                if not need_fundamental:  # 避免重复计数
+                                    retry_success += 1
+                        
+                        # 短暂延迟，避免请求过快
+                        time.sleep(0.1)
+                    except Exception as e:
+                        # 静默失败，继续处理下一个
+                        pass
+                
+                if retry_success > 0:
+                    print(f"  ✓ 二次重试完成: 成功获取 {retry_success} 只股票的数据")
+                    # 保存重试获取的缓存
+                    try:
+                        self.data_fetcher.flush_batch_cache()
+                    except:
+                        pass
         
         return preloaded_data
     
@@ -371,30 +475,28 @@ class ScoringStrategy(BaseStrategy):
         results = []
         total = len(preloaded_data)
         
-        print(f"\n开始计算 {total} 只股票的评分...")
-        print("=" * 60)
+        # 阶段3：评分计算
+        print("\n【阶段3】评分计算")
+        print(f"  计算股票评分 ({total} 只)...")
         
         try:
-            for stock_code, data in tqdm(preloaded_data.items(), desc="计算评分进度", total=total):
+            for stock_code, data in tqdm(preloaded_data.items(), desc="  进度", total=total, leave=False):
                 try:
                     stock_name = data.get('stock_name', stock_name_map.get(stock_code, ""))
                     kline_data = data['kline_data']
                     fundamental_data = data['fundamental_data']
                     financial_data = data['financial_data']
-                    sector_kline_list = data['sector_kline_list']
                     
                     # 计算各维度得分
                     fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
                     volume_score = self.volume_scorer.score(kline_data)
                     price_score = self.price_scorer.score(kline_data)
-                    sector_score = self.sector_scorer.score(sector_kline_list, kline_data)
                     
                     # 计算综合得分
                     total_score = (
                         fundamental_score * self.weights['fundamental'] +
                         volume_score * self.weights['volume'] +
-                        price_score * self.weights['price'] +
-                        sector_score * self.weights['sector']
+                        price_score * self.weights['price']
                     )
                     
                     # 获取当前价格信息
@@ -409,15 +511,12 @@ class ScoringStrategy(BaseStrategy):
                         'fundamental_score': round(fundamental_score, 2),
                         'volume_score': round(volume_score, 2),
                         'price_score': round(price_score, 2),
-                        'sector_score': round(sector_score, 2),
                         'current_price': round(current_price, 2),
                         'current_volume': current_volume,
-                        'pe_ratio': fundamental_data.get('pe_ratio', 0),
-                        'pb_ratio': fundamental_data.get('pb_ratio', 0),
-                        'roe': financial_data.get('roe', 0),
-                        'sectors': data.get('sectors', []),  # 添加板块信息
-                        'sector_count': len(data.get('sectors', [])),  # 板块数量
-                        'has_sector_kline': len(data.get('sector_kline_list', [])) > 0,  # 是否有板块K线数据
+                        # 保留None值，用于区分"数据缺失"和"数据为0"
+                        'pe_ratio': fundamental_data.get('pe_ratio'),
+                        'pb_ratio': fundamental_data.get('pb_ratio'),
+                        'roe': financial_data.get('roe'),
                     }
                     
                     results.append(result)
@@ -427,68 +526,12 @@ class ScoringStrategy(BaseStrategy):
                     print(f"计算 {stock_code} {stock_name_map.get(stock_code, '')} 评分时出错: {e}")
                     continue
         except KeyboardInterrupt:
-            print(f"\n[中断] 评分计算被中断，已计算 {len(results)} 只股票的评分")
+            print(f"\n  ✗ 计算被中断，已计算 {len(results)} 只股票的评分")
             raise
         
-        print(f"\n评分计算完成！共计算 {len(results)} 只股票的评分")
-        print("=" * 60)
+        print(f"  ✓ 计算完成: 共 {len(results)} 只股票")
         
         return results
-    
-    def calculate_sector_trends(self, results: List[Dict]) -> List[Dict]:
-        """
-        计算板块趋势涨幅TOP 3
-        Args:
-            results: 股票评分结果列表
-        Returns:
-            板块趋势涨幅TOP 3列表
-        """
-        import numpy as np
-        sector_trends = {}  # {sector_name: {'stocks': count, 'avg_score': float, 'trend': float}}
-        
-        for result in results:
-            sectors = result.get('sectors', [])
-            sector_score = result.get('sector_score', 50)
-            
-            for sector in sectors:
-                if sector not in sector_trends:
-                    # 获取板块K线数据计算涨幅
-                    try:
-                        sector_kline = self.data_fetcher.get_sector_kline(sector)
-                        trend = 0.0
-                        if sector_kline is not None and not sector_kline.empty:
-                            if 'close' in sector_kline.columns:
-                                closes = sector_kline['close'].values
-                            elif '收盘' in sector_kline.columns:
-                                closes = sector_kline['收盘'].values
-                            else:
-                                closes = []
-                            
-                            if len(closes) >= 20:
-                                # 计算20日涨幅
-                                trend = (closes[-1] - closes[-20]) / closes[-20] if closes[-20] > 0 else 0
-                            elif len(closes) >= 5:
-                                # 计算5日涨幅
-                                trend = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
-                    except:
-                        trend = 0.0
-                    
-                    sector_trends[sector] = {
-                        'sector': sector,
-                        'trend': trend * 100,  # 转换为百分比
-                        'stock_count': 0,
-                        'avg_score': 0.0
-                    }
-                
-                sector_trends[sector]['stock_count'] += 1
-                sector_trends[sector]['avg_score'] = (
-                    (sector_trends[sector]['avg_score'] * (sector_trends[sector]['stock_count'] - 1) + sector_score) 
-                    / sector_trends[sector]['stock_count']
-                )
-        
-        # 按涨幅降序排序，取TOP 3
-        sorted_sectors = sorted(sector_trends.values(), key=lambda x: x['trend'], reverse=True)
-        return sorted_sectors[:3]
     
     def select_top_stocks(self, stock_codes: List[str] = None, top_n: int = 20, 
                          board_types: List[str] = None, max_workers: int = 5) -> pd.DataFrame:
@@ -510,7 +553,8 @@ class ScoringStrategy(BaseStrategy):
             stock_codes = self.data_fetcher.get_all_stock_codes(board_types)
             # 确保所有代码都是字符串类型
             stock_codes = [str(code) for code in stock_codes]
-            print(f"\n获取到 {len(stock_codes)} 只股票（板块: {board_types}）")
+            print(f"\n【股票筛选】")
+            print(f"  获取到 {len(stock_codes)} 只股票（板块: {board_types}）")
             if 'main' in board_types:
                 # 统计主板股票分布
                 shanghai_main = len([c for c in stock_codes if str(c).startswith('60')])
@@ -518,6 +562,9 @@ class ScoringStrategy(BaseStrategy):
                 print(f"  其中：上证主板 {shanghai_main} 只，深圳主板 {shenzhen_main} 只")
         
         # 准备股票名称映射
+        # 优化：确保股票列表已加载（延迟加载）
+        if self.data_fetcher.stock_list is None or self.data_fetcher.stock_list.empty:
+            self.data_fetcher._load_stock_list()
         stock_info = self.data_fetcher.stock_list
         stock_name_map = {}
         if stock_info is not None and not stock_info.empty:
@@ -542,31 +589,25 @@ class ScoringStrategy(BaseStrategy):
         filtered_stock_codes = [code for code in stock_codes if not is_st_stock(code)]
         st_count = len(stock_codes) - len(filtered_stock_codes)
         if st_count > 0:
-            print(f"已剔除 {st_count} 只ST股票")
+            print(f"  已剔除 {st_count} 只ST股票")
         stock_codes = filtered_stock_codes
         total = len(stock_codes)
         
-        # 步骤1: 预加载所有数据（数据获取阶段）
-        print("\n" + "=" * 60)
-        print("步骤1: 数据预加载阶段")
-        print("=" * 60)
+        # 预加载所有数据（数据获取阶段）
         preloaded_data = self.preload_all_data(stock_codes, stock_name_map, max_workers)
         
         if not preloaded_data:
-            print("没有成功预加载任何数据，无法进行计算")
+            print("\n【错误】")
+            print("  没有成功预加载任何数据，无法进行计算")
             return pd.DataFrame()
         
-        # 步骤2: 基于预加载的数据计算评分（计算阶段）
-        print("\n" + "=" * 60)
-        print("步骤2: 评分计算阶段")
-        print("=" * 60)
+        # 基于预加载的数据计算评分（计算阶段）
         results = self.calculate_scores_from_preloaded_data(preloaded_data, stock_name_map)
         
         # 数据可用性统计（用于动态调整权重）
         data_availability = {
             'fundamental': {'available': 0, 'total': 0},
             'financial': {'available': 0, 'total': 0},
-            'sector': {'available': 0, 'total': 0},
         }
         
         def collect_data_availability(results_list: List[Dict]):
@@ -574,23 +615,20 @@ class ScoringStrategy(BaseStrategy):
             for result in results_list:
                 # 统计基本面数据可用性
                 data_availability['fundamental']['total'] += 1
-                if result.get('pe_ratio', 0) > 0 or result.get('pb_ratio', 0) > 0:
+                pe_ratio = result.get('pe_ratio')
+                pb_ratio = result.get('pb_ratio')
+                # 改进：区分None（数据缺失）和0（数据为0，如亏损股）
+                # 如果至少有一个不是None（包括0），视为有数据
+                if pe_ratio is not None or pb_ratio is not None:
                     data_availability['fundamental']['available'] += 1
                 
                 # 统计财务数据可用性
                 data_availability['financial']['total'] += 1
-                if result.get('roe', 0) != 0:
+                roe = result.get('roe')
+                # 改进：区分None（数据缺失）和0（数据为0）
+                # 如果roe不是None（包括0），视为有数据
+                if roe is not None:
                     data_availability['financial']['available'] += 1
-                
-                # 统计板块数据可用性（检查是否有板块K线数据）
-                # 注意：50分可能是真实评分，不能仅凭50分判断数据不可用
-                # 应该检查是否有板块信息或板块K线数据
-                data_availability['sector']['total'] += 1
-                # 如果板块评分存在且不是默认的50分，或者有板块信息，认为数据可用
-                sector_score = result.get('sector_score', 50)
-                has_sector_info = result.get('sectors', []) or result.get('sector_count', 0) > 0
-                if (sector_score != 50) or has_sector_info:
-                    data_availability['sector']['available'] += 1
                 
         
         def adjust_weights_by_availability(availability_stats: Dict) -> Dict:
@@ -608,22 +646,15 @@ class ScoringStrategy(BaseStrategy):
             # 检查各维度数据可用性
             fundamental_ratio = availability_stats['fundamental']['available'] / total_stocks if total_stocks > 0 else 0
             financial_ratio = availability_stats['financial']['available'] / total_stocks if total_stocks > 0 else 0
-            sector_ratio = availability_stats['sector']['available'] / total_stocks if total_stocks > 0 else 0
             
             # 如果所有股票都缺失某个指标，权重设为0
             if fundamental_ratio == 0:
                 adjusted_weights['fundamental'] = 0
-                print(f"  警告: 所有股票都缺失基本面数据，已移除基本面权重")
+                print(f"  ⚠ 警告: 所有股票都缺失基本面数据，已移除基本面权重")
             
             if financial_ratio == 0:
                 adjusted_weights['financial'] = 0
-                print(f"  警告: 所有股票都缺失财务数据，已移除财务权重")
-            
-            if sector_ratio == 0:
-                adjusted_weights['sector'] = 0
-                print(f"  警告: 所有股票都缺失板块数据，已移除板块权重")
-                print(f"    提示: 板块数据需要：1) 股票有行业信息 2) 能找到对应的行业指数 3) 能获取指数K线数据")
-                print(f"    可能原因: 行业指数匹配失败、指数K线数据获取失败、或需要2000积分")
+                print(f"  ⚠ 警告: 所有股票都缺失财务数据，已移除财务权重")
             
             
             # 重新归一化权重（确保总和为1）
@@ -633,7 +664,7 @@ class ScoringStrategy(BaseStrategy):
                     adjusted_weights[key] = adjusted_weights[key] / total_weight
             else:
                 # 如果所有权重都为0，使用默认权重
-                print("  警告: 所有权重都为0，使用默认权重")
+                print("  ⚠ 警告: 所有权重都为0，使用默认权重")
                 adjusted_weights = self.weights.copy()
             
             return adjusted_weights
@@ -643,32 +674,26 @@ class ScoringStrategy(BaseStrategy):
             collect_data_availability(results)
             
             # 根据数据可用性动态调整权重
-            print("\n" + "=" * 60)
-            print("数据可用性统计:")
-            print(f"  基本面数据: {data_availability['fundamental']['available']}/{data_availability['fundamental']['total']} ({data_availability['fundamental']['available']/data_availability['fundamental']['total']*100:.1f}%)")
-            print(f"  财务数据: {data_availability['financial']['available']}/{data_availability['financial']['total']} ({data_availability['financial']['available']/data_availability['financial']['total']*100:.1f}%)")
-            print(f"  板块数据: {data_availability['sector']['available']}/{data_availability['sector']['total']} ({data_availability['sector']['available']/data_availability['sector']['total']*100:.1f}%)")
-            print("=" * 60)
+            fundamental_ratio = data_availability['fundamental']['available']/data_availability['fundamental']['total']*100 if data_availability['fundamental']['total'] > 0 else 0
+            financial_ratio = data_availability['financial']['available']/data_availability['financial']['total']*100 if data_availability['financial']['total'] > 0 else 0
+            print(f"\n【数据可用性】")
+            print(f"  基本面: {data_availability['fundamental']['available']}/{data_availability['fundamental']['total']} ({fundamental_ratio:.1f}%)")
+            print(f"  财务: {data_availability['financial']['available']}/{data_availability['financial']['total']} ({financial_ratio:.1f}%)")
             
             # 动态调整权重并重新计算得分
             adjusted_weights = adjust_weights_by_availability(data_availability)
             # 保存调整后的权重，供主程序访问
             self._last_adjusted_weights = adjusted_weights.copy()
             if adjusted_weights != self.weights:
-                print("\n根据数据可用性动态调整权重:")
-                for key in self.weights:
-                    if self.weights[key] != adjusted_weights[key]:
-                        print(f"  {key}: {self.weights[key]:.3f} -> {adjusted_weights[key]:.3f}")
-                
                 # 使用调整后的权重重新计算得分
-                print("\n使用调整后的权重重新计算得分...")
+                print("\n【权重调整】")
+                print("  根据数据可用性调整权重并重新计算得分...")
                 for result in results:
                     # 重新计算综合得分
                     total_score = (
-                        result.get('fundamental_score', 0) * adjusted_weights['fundamental'] +
-                        result.get('volume_score', 0) * adjusted_weights['volume'] +
-                        result.get('price_score', 0) * adjusted_weights['price'] +
-                        result.get('sector_score', 0) * adjusted_weights['sector']
+                        (result.get('fundamental_score') or 0) * adjusted_weights['fundamental'] +
+                        (result.get('volume_score') or 0) * adjusted_weights['volume'] +
+                        (result.get('price_score') or 0) * adjusted_weights['price']
                     )
                     result['score'] = round(total_score, 2)
                     result['total_score'] = round(total_score, 2)
@@ -677,7 +702,8 @@ class ScoringStrategy(BaseStrategy):
                 self._last_adjusted_weights = self.weights.copy()
         
         if not results:
-            print("未找到符合条件的股票")
+            print("\n【结果】")
+            print("  未找到符合条件的股票")
             return pd.DataFrame()
         
         # 转换为DataFrame并排序
@@ -703,18 +729,6 @@ class ScoringStrategy(BaseStrategy):
         if 'code' in df.columns and 'name' in df.columns:
             cols = ['code', 'name'] + [col for col in df.columns if col not in ['code', 'name']]
             df = df[cols]
-        
-        # 计算板块趋势涨幅TOP 3
-        print("\n" + "=" * 60)
-        print("计算板块趋势...")
-        print("=" * 60)
-        self._top_sectors = self.calculate_sector_trends(results)
-        
-        # 格式化板块信息用于显示
-        for idx, row in df.iterrows():
-            sectors = row.get('sectors', [])
-            if isinstance(sectors, list):
-                df.at[idx, 'sectors'] = ', '.join(sectors) if sectors else '无'
         
         return df
 

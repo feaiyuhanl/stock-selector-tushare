@@ -4,10 +4,9 @@
 
 # 各维度权重配置（总和应为1.0）
 WEIGHT_CONFIG = {
-    'fundamental': 0.35,      # 基本面权重
-    'volume': 0.25,           # 成交量权重
-    'price': 0.25,            # 成交价格权重
-    'sector': 0.15,           # 关联板块走势权重
+    'fundamental': 0.40,      # 基本面权重
+    'volume': 0.30,           # 成交量权重
+    'price': 0.30,            # 成交价格权重
 }
 
 # 基本面子维度权重
@@ -33,11 +32,11 @@ PRICE_WEIGHTS = {
     'volatility': 0.35,        # 波动率
 }
 
-# 板块/概念走势权重
-SECTOR_CONCEPT_WEIGHTS = {
-    'sector_trend': 0.50,      # 板块/概念趋势
-    'relative_strength': 0.50, # 相对强度
-}
+# 板块/概念走势权重（已废弃，保留用于兼容性）
+# SECTOR_CONCEPT_WEIGHTS = {
+#     'sector_trend': 0.50,      # 板块/概念趋势
+#     'relative_strength': 0.50, # 相对强度
+# }
 
 # 评分范围
 SCORE_MIN = 0
