@@ -1023,20 +1023,59 @@ class DataFetcher:
                     latest = df.iloc[-1]
                     
                     # 获取利润表数据计算增长率
-                    income_df = self.pro.income(ts_code=ts_code, start_date=start_date, end_date=end_date,
+                    # 改进：获取更长周期的数据，确保有足够的历史数据进行比较
+                    income_df = self.pro.income(ts_code=ts_code,
+                                               start_date=(datetime.now() - timedelta(days=730)).strftime('%Y%m%d'),  # 2年数据
+                                               end_date=end_date,
                                                fields='ts_code,end_date,revenue,n_income')
-                    
+
                     revenue_growth = 0
                     profit_growth = 0
-                    
+
                     if income_df is not None and not income_df.empty:
                         income_df = income_df.sort_values('end_date')
-                        if len(income_df) >= 2:
+                        if len(income_df) >= 4:  # 确保至少有4个季度的数据
+                            # 改进：计算最近一年（4个季度）的同比增长率
+                            # 获取最近4个季度的数据
+                            recent_data = income_df.tail(4)
+                            if len(recent_data) >= 4:
+                                # 计算最近两个完整年度的数据（如果有）
+                                yearly_data = self._extract_yearly_data(income_df)
+                                if len(yearly_data) >= 2:
+                                    # 使用年度数据计算增长率更准确
+                                    latest_year = yearly_data.iloc[-1]
+                                    prev_year = yearly_data.iloc[-2]
+                                    if prev_year['revenue'] and prev_year['revenue'] != 0:
+                                        revenue_growth = ((latest_year['revenue'] - prev_year['revenue']) / prev_year['revenue']) * 100
+                                    if prev_year['n_income'] and prev_year['n_income'] != 0:
+                                        profit_growth = ((latest_year['n_income'] - prev_year['n_income']) / prev_year['n_income']) * 100
+                                else:
+                                    # 如果年度数据不足，使用季度环比增长率（近似值）
+                                    # 取最近两个季度的环比数据作为近似增长率
+                                    latest_revenue = recent_data.iloc[-1]['revenue']
+                                    prev_revenue = recent_data.iloc[-2]['revenue']
+                                    if prev_revenue and prev_revenue != 0:
+                                        # 季度环比增长率需要调整为年度化
+                                        quarterly_growth = ((latest_revenue - prev_revenue) / prev_revenue) * 100
+                                        # 粗略年度化（乘以4，但这只是近似）
+                                        revenue_growth = quarterly_growth * 4
+                                    else:
+                                        revenue_growth = 0
+
+                                    latest_profit = recent_data.iloc[-1]['n_income']
+                                    prev_profit = recent_data.iloc[-2]['n_income']
+                                    if prev_profit and prev_profit != 0:
+                                        quarterly_profit_growth = ((latest_profit - prev_profit) / prev_profit) * 100
+                                        profit_growth = quarterly_profit_growth * 4
+                                    else:
+                                        profit_growth = 0
+                        elif len(income_df) >= 2:
+                            # 降级方案：至少有两个数据点时计算简单增长率
                             latest_revenue = income_df.iloc[-1]['revenue']
                             prev_revenue = income_df.iloc[-2]['revenue']
                             if prev_revenue and prev_revenue != 0:
                                 revenue_growth = ((latest_revenue - prev_revenue) / prev_revenue) * 100
-                            
+
                             latest_profit = income_df.iloc[-1]['n_income']
                             prev_profit = income_df.iloc[-2]['n_income']
                             if prev_profit and prev_profit != 0:
@@ -1072,6 +1111,24 @@ class DataFetcher:
             return float(value) if value else 0.0
         except:
             return 0.0
+
+    def _extract_yearly_data(self, income_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        从利润表数据中提取年度数据
+        选择每年最后一个报告期的数据作为年度数据
+        """
+        if income_df is None or income_df.empty:
+            return pd.DataFrame()
+
+        # 确保end_date是datetime类型
+        income_df = income_df.copy()
+        income_df['end_date'] = pd.to_datetime(income_df['end_date'])
+        income_df['year'] = income_df['end_date'].dt.year
+
+        # 为每个年度选择最后一个报告期的数据
+        yearly_data = income_df.sort_values('end_date').groupby('year').last().reset_index()
+
+        return yearly_data
     
     def get_stock_sectors(self, stock_code: str, force_refresh: bool = None) -> List[str]:
         """

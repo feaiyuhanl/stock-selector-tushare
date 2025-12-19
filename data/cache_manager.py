@@ -1,21 +1,21 @@
 """
-缓存管理模块：管理本地Excel缓存
+缓存管理模块：管理本地SQLite缓存
 """
 import pandas as pd
 import os
 import glob
 import threading
 import time
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import config
-from openpyxl import load_workbook
-from openpyxl.styles import NamedStyle
+import json
 
 
 class CacheManager:
-    """缓存管理器"""
-    
+    """缓存管理器 - SQLite实现"""
+
     def __init__(self, cache_dir: str = "cache"):
         """
         初始化缓存管理器
@@ -24,34 +24,10 @@ class CacheManager:
         """
         self.cache_dir = cache_dir
         self._ensure_cache_dir()
-        
-        # 统一的缓存目录结构（扁平化，只保留1级目录）
-        # K线数据目录（所有K线数据统一放在这里，包括股票、板块、概念的K线）
-        self.kline_cache_dir = os.path.join(cache_dir, "kline")
-        
-        # 元数据目录：存储汇总信息和集中存储文件（用于快速查询和兼容性）
-        self.meta_dir = os.path.join(cache_dir, "meta")
-        
-        # 集中存储文件路径（放在meta目录下，统一管理）
-        # 这些文件用于快速批量查询，但主要使用独立文件存储
-        self.fundamental_cache = os.path.join(self.meta_dir, "fundamental_data.xlsx")
-        self.financial_cache = os.path.join(self.meta_dir, "financial_data.xlsx")
-        self.sectors_cache = os.path.join(self.meta_dir, "stock_sectors.xlsx")
-        self.concepts_cache = os.path.join(self.meta_dir, "stock_concepts.xlsx")
-        self.stock_list_cache = os.path.join(self.meta_dir, "stock_list.xlsx")
-        
-        # 确保所有缓存目录存在
-        required_dirs = [
-            self.kline_cache_dir,
-            self.meta_dir
-        ]
-        for cache_dir_path in required_dirs:
-            if not os.path.exists(cache_dir_path):
-                os.makedirs(cache_dir_path)
-        
-        # 清理可能存在的临时文件
-        self._cleanup_temp_files()
-        
+
+        # SQLite数据库文件路径
+        self.db_path = os.path.join(cache_dir, "stock_cache.db")
+
         # 缓存有效期（天数）
         # 说明：超过有效期后，缓存自动失效，会重新从API获取数据
         self.cache_valid_days = {
@@ -62,130 +38,182 @@ class CacheManager:
             'stock_list': 1,       # 缓存有效期1天（超过1天自动失效）
             'kline': 1,            # 缓存有效期1天（必须是今天，否则失效）
         }
-        
+
         # 定义哪些数据类型是低频的（变化频率低，但缓存失效后仍会重新获取）
         self.low_frequency_types = ['financial', 'sectors', 'concepts']
-        
-        # 文件级别的锁，防止并发写入导致文件句柄泄露（Windows上特别重要）
-        self._file_locks = {
+
+        # 数据库级别的锁，防止并发写入
+        self._db_locks = {
             'fundamental': threading.Lock(),
             'financial': threading.Lock(),
             'sectors': threading.Lock(),
             'concepts': threading.Lock(),
             'stock_list': threading.Lock(),
+            'kline': threading.Lock(),
         }
-        
-        # 内存缓存（优化：避免重复读取Excel文件）
+
+        # 内存缓存（优化：避免重复读取数据库）
         # 格式: {stock_code: data_dict}
         self._fundamental_cache_memory: Optional[Dict[str, Dict]] = None
         self._financial_cache_memory: Optional[Dict[str, Dict]] = None
         self._fundamental_cache_lock = threading.Lock()  # 保护内存缓存的读取和初始化
         self._financial_cache_lock = threading.Lock()
-    
+
+        # 初始化数据库
+        self._init_database()
+
+    def _init_database(self):
+        """初始化SQLite数据库和表结构"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # 创建基本面数据表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS fundamental_data (
+                    code TEXT PRIMARY KEY,
+                    pe_ratio REAL,
+                    pb_ratio REAL,
+                    roe REAL,
+                    revenue_growth REAL,
+                    profit_growth REAL,
+                    update_time TEXT NOT NULL,
+                    created_time TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 创建财务数据表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS financial_data (
+                    code TEXT PRIMARY KEY,
+                    roe REAL,
+                    update_time TEXT NOT NULL,
+                    created_time TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 创建板块数据表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stock_sectors (
+                    code TEXT PRIMARY KEY,
+                    sectors TEXT,  -- JSON格式存储板块列表
+                    update_time TEXT NOT NULL,
+                    created_time TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 创建概念数据表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stock_concepts (
+                    code TEXT PRIMARY KEY,
+                    concepts TEXT,  -- JSON格式存储概念列表
+                    update_time TEXT NOT NULL,
+                    created_time TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 创建股票列表表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stock_list (
+                    code TEXT PRIMARY KEY,
+                    name TEXT,
+                    market TEXT,
+                    area TEXT,
+                    industry TEXT,
+                    list_date TEXT,
+                    update_time TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 创建K线数据表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS kline_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    cache_type TEXT NOT NULL,  -- 'stock', 'sector', 'concept'
+                    period TEXT NOT NULL,      -- 'daily', 'weekly', 'monthly'
+                    date TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    amount REAL,
+                    update_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(symbol, cache_type, period, date)
+                )
+            ''')
+
+            # 创建索引以提高查询性能
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_fundamental_code ON fundamental_data(code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON financial_data(code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sectors_code ON stock_sectors(code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_concepts_code ON stock_concepts(code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_list_code ON stock_list(code)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_kline_symbol_type_period ON kline_data(symbol, cache_type, period)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_data(date)')
+
+            conn.commit()
+
     def _ensure_cache_dir(self):
         """确保缓存目录存在"""
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
     
-    def _cleanup_temp_files(self):
-        """清理可能存在的临时文件（程序异常退出时可能留下）"""
-        try:
-            # 清理meta目录下的临时文件
-            if os.path.exists(self.meta_dir):
-                for filename in os.listdir(self.meta_dir):
-                    # 清理旧的.tmp文件和新的_temp.xlsx临时文件
-                    if filename.endswith('.tmp') or filename.endswith('_temp.xlsx'):
-                        temp_file = os.path.join(self.meta_dir, filename)
-                        try:
-                            os.remove(temp_file)
-                        except:
-                            pass
-        except:
-            pass
-    
-    def _is_cache_valid(self, cache_file: str, cache_type: str) -> bool:
+    def _is_cache_valid(self, cache_type: str, stock_code: str = None) -> bool:
         """
         检查缓存是否有效
         Args:
-            cache_file: 缓存文件路径
             cache_type: 缓存类型
+            stock_code: 股票代码（对于需要按股票检查的缓存）
         Returns:
             是否有效
         """
-        if not os.path.exists(cache_file):
-            return False
-        
-        # 检查文件修改时间
-        mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
-        valid_days = self.cache_valid_days.get(cache_type, 7)
-        
-        # 对于当日缓存（K线数据），检查是否是同一天
-        if cache_type == 'kline':
-            return mtime.date() == datetime.now().date()
-        
-        return (datetime.now() - mtime).days < valid_days
-    
-    def _is_excel_file_valid(self, file_path: str) -> bool:
-        """
-        检查Excel文件是否有效（未损坏）
-        Args:
-            file_path: Excel文件路径
-        Returns:
-            文件是否有效
-        """
-        if not os.path.exists(file_path):
-            return False
-        
         try:
-            # 尝试读取文件，检查是否损坏
-            df = pd.read_excel(file_path, engine='openpyxl', nrows=1)
-            return True
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                if cache_type == 'kline':
+                    # K线数据检查最新的记录时间
+                    cursor.execute('''
+                        SELECT MAX(date) FROM kline_data
+                        WHERE update_time >= date('now', '-1 day')
+                    ''')
+                else:
+                    # 其他数据类型检查是否有有效记录
+                    table_map = {
+                        'fundamental': 'fundamental_data',
+                        'financial': 'financial_data',
+                        'sectors': 'stock_sectors',
+                        'concepts': 'stock_concepts',
+                        'stock_list': 'stock_list'
+                    }
+
+                    if cache_type not in table_map:
+                        return False
+
+                    table_name = table_map[cache_type]
+                    valid_days = self.cache_valid_days.get(cache_type, 7)
+
+                    if stock_code:
+                        # 检查特定股票的数据是否有效
+                        cursor.execute(f'''
+                            SELECT COUNT(*) FROM {table_name}
+                            WHERE code = ? AND update_time >= datetime('now', '-{valid_days} day')
+                        ''', (stock_code,))
+                    else:
+                        # 检查表中是否有有效数据
+                        cursor.execute(f'''
+                            SELECT COUNT(*) FROM {table_name}
+                            WHERE update_time >= datetime('now', '-{valid_days} day')
+                        ''')
+
+                result = cursor.fetchone()
+                return result and result[0] > 0
+
         except Exception as e:
-            # 文件损坏，返回False
+            print(f"检查缓存有效性失败 ({cache_type}): {e}")
             return False
     
-    def _repair_corrupted_cache(self, cache_file: str, cache_type: str = 'fundamental'):
-        """
-        修复损坏的缓存文件
-        Args:
-            cache_file: 缓存文件路径
-            cache_type: 缓存类型
-        """
-        try:
-            # 对于sectors和concepts类型，如果文件损坏，直接删除，让程序重新创建
-            if cache_type in ['sectors', 'concepts']:
-                try:
-                    # 备份损坏的文件
-                    backup_file = cache_file.replace('.xlsx', '_backup.xlsx')
-                    if os.path.exists(cache_file):
-                        try:
-                            os.rename(cache_file, backup_file)
-                        except:
-                            # 如果重命名失败，直接删除
-                            try:
-                                os.remove(cache_file)
-                            except:
-                                pass
-                except:
-                    pass
-                return
-            
-            # 已迁移到meta目录，不再使用独立文件恢复
-            # 如果文件损坏，直接删除，让程序重新创建
-            try:
-                if os.path.exists(cache_file):
-                    os.remove(cache_file)
-                    print(f"已删除损坏的{cache_type}缓存文件（将重新创建）")
-            except:
-                pass
-        except Exception as e:
-            # 修复失败，删除损坏文件
-            try:
-                if os.path.exists(cache_file):
-                    os.remove(cache_file)
-                    print(f"修复失败，已删除损坏的{cache_type}缓存文件: {e}")
-            except:
-                pass
     
     def _is_data_valid(self, data: Dict, data_type: str) -> bool:
         """
@@ -199,13 +227,13 @@ class CacheManager:
         """
         if not data or not isinstance(data, dict):
             return False
-        
+
         if data_type == 'fundamental':
             # 基本面数据：至少需要pe_ratio或pb_ratio之一有效（不为None）
             # 改进：区分0值（可能是正常值，如亏损股的PE=0）和None值（数据缺失）
             pe = data.get('pe_ratio')
             pb = data.get('pb_ratio')
-            
+
             # 如果两个都是None，视为无效（数据缺失）
             # 如果至少有一个不是None（即使是0），视为有效
             if pe is None and pb is None:
@@ -217,12 +245,12 @@ class CacheManager:
             if roe is None:
                 return False
             return True
-        
+
         return True
     
     def get_fundamental(self, stock_code: str, force_refresh: bool = False) -> Optional[Dict]:
         """
-        从缓存获取基本面数据（优先从内存缓存读取，避免重复读取Excel文件）
+        从缓存获取基本面数据（优先从内存缓存读取，避免重复读取数据库）
         Args:
             stock_code: 股票代码
             force_refresh: 是否强制刷新
@@ -234,10 +262,10 @@ class CacheManager:
             with self._fundamental_cache_lock:
                 self._fundamental_cache_memory = None
             return None
-        
+
         # 确保代码格式化为6位字符串
         stock_code = str(stock_code).zfill(6)
-        
+
         # 优化：优先从内存缓存读取
         with self._fundamental_cache_lock:
             if self._fundamental_cache_memory is not None:
@@ -248,289 +276,166 @@ class CacheManager:
                     if self._is_data_valid(data, 'fundamental'):
                         return data.copy()  # 返回副本，避免外部修改影响缓存
                 return None
-            
-            # 内存缓存未加载，需要从文件加载
-            # 方式1：优先从集中文件读取（主要方式）
-            if self._is_cache_valid(self.fundamental_cache, 'fundamental'):
-                # 先检查文件是否损坏
-                if not self._is_excel_file_valid(self.fundamental_cache):
-                    # 文件损坏，尝试修复
-                    self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
-                    # 修复后如果文件仍不存在，跳过
-                    if not os.path.exists(self.fundamental_cache):
-                        pass
-                    else:
-                        # 修复后再次尝试读取
-                        try:
-                            df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                            # 确保code列是字符串格式
-                            if 'code' in df.columns:
-                                df['code'] = df['code'].astype(str).str.zfill(6)
-                            
-                            # 优化：一次性加载所有数据到内存缓存
-                            self._fundamental_cache_memory = {}
-                            for _, row in df.iterrows():
-                                code = str(row['code']).zfill(6)
-                                data = row.to_dict()
-                                if self._is_data_valid(data, 'fundamental'):
-                                    self._fundamental_cache_memory[code] = data
-                            
-                            # 从内存缓存获取当前股票的数据
-                            data = self._fundamental_cache_memory.get(stock_code)
-                            if data is not None:
-                                return data.copy()  # 返回副本
-                        except Exception as e:
-                            # 修复后仍然失败，删除文件
-                            try:
-                                os.remove(self.fundamental_cache)
-                            except:
-                                pass
-            else:
-                # 文件不存在或已过期，先检查文件是否存在
-                if not os.path.exists(self.fundamental_cache):
-                    # 文件不存在，直接返回None，不需要尝试读取或修复
-                    return None
-                
-                # 文件存在但已过期，尝试读取（可能是刚过期的有效数据）
+
+            # 内存缓存未加载，需要从数据库加载
+            if self._is_cache_valid('fundamental', stock_code):
                 try:
-                    df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                    # 确保code列是字符串格式
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
-                    
-                    # 优化：一次性加载所有数据到内存缓存
-                    self._fundamental_cache_memory = {}
-                    for _, row in df.iterrows():
-                        code = str(row['code']).zfill(6)
-                        data = row.to_dict()
-                        if self._is_data_valid(data, 'fundamental'):
-                            self._fundamental_cache_memory[code] = data
-                    
-                    # 从内存缓存获取当前股票的数据
-                    data = self._fundamental_cache_memory.get(stock_code)
-                    if data is not None:
-                        return data.copy()  # 返回副本
-                except FileNotFoundError:
-                    # 文件不存在（可能在检查后被删除），直接返回None
-                    return None
+                    with sqlite3.connect(self.db_path) as conn:
+                        # 查询所有基本面数据到内存缓存
+                        df = pd.read_sql_query('''
+                            SELECT * FROM fundamental_data
+                            WHERE update_time >= datetime('now', '-7 day')
+                        ''', conn)
+
+                        # 加载到内存缓存
+                        self._fundamental_cache_memory = {}
+                        for _, row in df.iterrows():
+                            code = str(row['code']).zfill(6)
+                            data = row.to_dict()
+                            # 移除数据库特有的字段
+                            data.pop('created_time', None)
+                            if self._is_data_valid(data, 'fundamental'):
+                                self._fundamental_cache_memory[code] = data
+
+                        # 从内存缓存获取当前股票的数据
+                        data = self._fundamental_cache_memory.get(stock_code)
+                        if data is not None:
+                            return data.copy()  # 返回副本
+
                 except Exception as e:
-                    # 读取失败，可能是文件损坏，尝试修复
-                    print(f"读取基本面集中缓存失败: {e}")
-                    self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
-        
-        # 方式2：从独立文件读取（兼容旧数据，已迁移到meta目录，不再使用）
-        # 旧数据已迁移到meta目录，不再读取独立文件
-        
+                    print(f"读取基本面缓存失败: {e}")
+                    # 清除内存缓存，避免下次继续失败
+                    self._fundamental_cache_memory = None
+
         return None
     
     def save_fundamental(self, stock_code: str, data: Dict):
         """
-        保存基本面数据到缓存（优化策略：只有一行数据的合并到集中文件，多行数据才用独立文件）
+        保存基本面数据到缓存
         Args:
             stock_code: 股票代码
             data: 基本面数据
         """
-        # 使用文件锁防止并发写入
-        with self._file_locks['fundamental']:
+        # 使用数据库锁防止并发写入
+        with self._db_locks['fundamental']:
             try:
                 # 验证数据有效性
                 if not self._is_data_valid(data, 'fundamental'):
                     return  # 无效数据不保存
-                
-                data_to_save = data.copy()
-                data_to_save['code'] = stock_code
-                data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                # 基本面数据只有一行，直接保存到集中文件（不创建独立文件）
-                # 先检查文件是否损坏
-                if os.path.exists(self.fundamental_cache):
-                    if not self._is_excel_file_valid(self.fundamental_cache):
-                        # 文件损坏，尝试修复
-                        self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
-                        # 如果修复失败，创建新文件
-                        if not os.path.exists(self.fundamental_cache) or not self._is_excel_file_valid(self.fundamental_cache):
-                            df = pd.DataFrame()
-                        else:
-                            df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                    else:
-                        df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                    # 确保code列是字符串格式
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
-                    # 移除旧数据
-                    df = df[df['code'] != stock_code]
-                else:
-                    df = pd.DataFrame()
-                
-                new_row = pd.DataFrame([data_to_save])
-                # 如果 df 为空或 None，直接使用 new_row；否则使用 concat
-                if df is None or df.empty or len(df) == 0:
-                    df = new_row
-                else:
-                    # 确保列对齐，避免 FutureWarning
-                    if not df.columns.equals(new_row.columns):
-                        # 统一列顺序和类型
-                        all_columns = list(df.columns) + [col for col in new_row.columns if col not in df.columns]
-                        df = df.reindex(columns=all_columns)
-                        new_row = new_row.reindex(columns=all_columns)
-                    df = pd.concat([df, new_row], ignore_index=True, sort=False)
-                
-                # 使用临时文件写入，避免写入过程中文件损坏
-                # 使用.xlsx扩展名，pandas才能正确识别文件类型
-                temp_file = self.fundamental_cache.replace('.xlsx', '_temp.xlsx')
-                try:
-                    # 写入临时文件
-                    df.to_excel(temp_file, index=False, engine='openpyxl')
-                    # 确保写入完成，文件句柄关闭
-                    del df
-                    time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
-                    
-                    # 删除原文件（带重试机制）
-                    max_retries = 5
-                    for attempt in range(max_retries):
-                        try:
-                            if os.path.exists(self.fundamental_cache):
-                                os.remove(self.fundamental_cache)
-                            break
-                        except PermissionError:
-                            if attempt < max_retries - 1:
-                                time.sleep(0.2)  # 等待文件句柄释放
-                            else:
-                                raise
-                    
-                    # 重命名临时文件
-                    os.rename(temp_file, self.fundamental_cache)
-                    
+
+                stock_code = str(stock_code).zfill(6)
+                update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+
+                    # 插入或更新数据
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO fundamental_data
+                        (code, pe_ratio, pb_ratio, roe, revenue_growth, profit_growth, update_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        stock_code,
+                        data.get('pe_ratio'),
+                        data.get('pb_ratio'),
+                        data.get('roe'),
+                        data.get('revenue_growth'),
+                        data.get('profit_growth'),
+                        update_time
+                    ))
+
+                    conn.commit()
+
                     # 优化：更新内存缓存（如果已加载）
                     with self._fundamental_cache_lock:
                         if self._fundamental_cache_memory is not None:
                             # 更新内存缓存中的数据
-                            clean_code = str(stock_code).zfill(6)
-                            # 移除 update_time 和 code，保持与读取时一致
                             cache_data = data.copy()
-                            self._fundamental_cache_memory[clean_code] = cache_data
-                except Exception as e:
-                    # 如果写入失败，删除临时文件
-                    if os.path.exists(temp_file):
-                        try:
-                            os.remove(temp_file)
-                        except:
-                            pass
-                    raise e
-                
-                # 旧数据已迁移到meta目录，不再使用独立文件
+                            self._fundamental_cache_memory[stock_code] = cache_data
+
             except Exception as e:
                 print(f"保存基本面缓存失败: {e}")
     
     def batch_save_fundamental(self, data_dict: Dict[str, Dict]):
         """
-        批量保存基本面数据（提高效率，减少IO操作，只保存到集中文件）
+        批量保存基本面数据（提高效率，使用SQLite事务）
         Args:
             data_dict: {stock_code: data_dict} 字典
         """
         if not data_dict:
             return
-        
-        # 使用文件锁防止并发写入
-        with self._file_locks['fundamental']:
+
+        # 添加重试机制处理并发冲突
+        max_batch_retries = 3
+        for batch_attempt in range(max_batch_retries):
             try:
-                # 读取现有集中文件
-                df = None
-                if os.path.exists(self.fundamental_cache):
-                    # 检查文件是否损坏
-                    if not self._is_excel_file_valid(self.fundamental_cache):
-                        # 文件损坏，尝试修复
-                        self._repair_corrupted_cache(self.fundamental_cache, 'fundamental')
-                        # 如果修复失败，创建新文件
-                        if not os.path.exists(self.fundamental_cache) or not self._is_excel_file_valid(self.fundamental_cache):
-                            df = pd.DataFrame()
-                        else:
-                            df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                    else:
-                        df = pd.read_excel(self.fundamental_cache, engine='openpyxl')
-                    # 确保code列是字符串格式
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
-                    # 移除要更新的股票旧数据
-                    existing_codes = set(str(code).zfill(6) for code in data_dict.keys())
-                    df = df[~df['code'].isin(existing_codes)]
-                else:
-                    df = pd.DataFrame()
-                
-                # 准备新数据（只保存到集中文件，不创建独立文件）
-                new_rows = []
-                for stock_code, data in data_dict.items():
-                    # 验证数据有效性
-                    if not self._is_data_valid(data, 'fundamental'):
-                        continue
-                    
-                    data_to_save = data.copy()
-                    data_to_save['code'] = str(stock_code).zfill(6)
-                    data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    new_rows.append(data_to_save)
-                
-                # 批量更新集中文件（使用临时文件，避免写入过程中文件损坏）
-                if new_rows:
-                    new_df = pd.DataFrame(new_rows)
-                    # 如果 df 为空，直接使用 new_df；否则确保列对齐后 concat
-                    if df is None or df.empty or len(df) == 0:
-                        df = new_df
-                    else:
-                        # 确保列对齐，避免 FutureWarning
-                        if not df.columns.equals(new_df.columns):
-                            # 统一列顺序和类型
-                            all_columns = list(df.columns) + [col for col in new_df.columns if col not in df.columns]
-                            df = df.reindex(columns=all_columns)
-                            new_df = new_df.reindex(columns=all_columns)
-                        df = pd.concat([df, new_df], ignore_index=True)
-                    # 使用.xlsx扩展名，pandas才能正确识别文件类型
-                    temp_file = self.fundamental_cache.replace('.xlsx', '_temp.xlsx')
-                    try:
-                        # 写入临时文件
-                        df.to_excel(temp_file, index=False, engine='openpyxl')
-                        # 确保写入完成，文件句柄关闭
-                        del df
-                        time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
-                        
-                        # 删除原文件（带重试机制）
-                        max_retries = 5
-                        for attempt in range(max_retries):
-                            try:
-                                if os.path.exists(self.fundamental_cache):
-                                    os.remove(self.fundamental_cache)
-                                break
-                            except PermissionError:
-                                if attempt < max_retries - 1:
-                                    time.sleep(0.2)  # 等待文件句柄释放
-                                else:
-                                    raise
-                        
-                        # 重命名临时文件
-                        os.rename(temp_file, self.fundamental_cache)
-                        
-                        # 优化：更新内存缓存（如果已加载）
-                        with self._fundamental_cache_lock:
-                            if self._fundamental_cache_memory is not None:
-                                # 更新内存缓存中的数据
-                                for stock_code, data in data_dict.items():
-                                    clean_code = str(stock_code).zfill(6)
-                                    if self._is_data_valid(data, 'fundamental'):
-                                        cache_data = data.copy()
-                                        self._fundamental_cache_memory[clean_code] = cache_data
-                    except Exception as e:
-                        # 如果写入失败，删除临时文件
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except:
-                                pass
-                        raise e
+                # 使用数据库锁防止并发写入
+                with self._db_locks['fundamental']:
+                    update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                    with sqlite3.connect(self.db_path) as conn:
+                        cursor = conn.cursor()
+
+                        # 准备批量插入数据
+                        data_to_insert = []
+                        for stock_code, data in data_dict.items():
+                            # 验证数据有效性
+                            if not self._is_data_valid(data, 'fundamental'):
+                                continue
+
+                            stock_code = str(stock_code).zfill(6)
+                            data_to_insert.append((
+                                stock_code,
+                                data.get('pe_ratio'),
+                                data.get('pb_ratio'),
+                                data.get('roe'),
+                                data.get('revenue_growth'),
+                                data.get('profit_growth'),
+                                update_time
+                            ))
+
+                        if data_to_insert:
+                            # 使用INSERT OR REPLACE进行批量更新
+                            cursor.executemany('''
+                                INSERT OR REPLACE INTO fundamental_data
+                                (code, pe_ratio, pb_ratio, roe, revenue_growth, profit_growth, update_time)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ''', data_to_insert)
+
+                            conn.commit()
+
+                            # 优化：更新内存缓存（如果已加载）
+                            with self._fundamental_cache_lock:
+                                if self._fundamental_cache_memory is not None:
+                                    # 更新内存缓存中的数据
+                                    for stock_code, data in data_dict.items():
+                                        clean_code = str(stock_code).zfill(6)
+                                        if self._is_data_valid(data, 'fundamental'):
+                                            cache_data = data.copy()
+                                            self._fundamental_cache_memory[clean_code] = cache_data
+
+                break  # 成功后退出重试循环
+
             except Exception as e:
-                print(f"批量保存基本面缓存失败: {e}")
+                print(f"批量保存基本面缓存失败 (尝试 {batch_attempt + 1}/{max_batch_retries}): {e}")
+                # 记录更详细的错误信息
+                import traceback
+                print(f"错误详情: {traceback.format_exc()}")
+
+                # 如果不是最后一次尝试，等待后重试
+                if batch_attempt < max_batch_retries - 1:
+                    wait_time = (batch_attempt + 1) * 0.5  # 递增等待时间
+                    print(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # 最后一次尝试失败，记录错误但不抛出异常
+                    print(f"批量保存基本面缓存失败，已达到最大重试次数: {e}")
+                    return
     
     def get_financial(self, stock_code: str, force_refresh: bool = False) -> Optional[Dict]:
         """
-        从缓存获取财务数据（优先从内存缓存读取，避免重复读取Excel文件）
+        从缓存获取财务数据（优先从内存缓存读取，避免重复读取数据库）
         Args:
             stock_code: 股票代码
             force_refresh: 是否强制刷新
@@ -542,10 +447,10 @@ class CacheManager:
             with self._financial_cache_lock:
                 self._financial_cache_memory = None
             return None
-        
+
         # 确保代码格式化为6位字符串
         stock_code = str(stock_code).zfill(6)
-        
+
         # 优化：优先从内存缓存读取
         with self._financial_cache_lock:
             if self._financial_cache_memory is not None:
@@ -556,285 +461,154 @@ class CacheManager:
                     if self._is_data_valid(data, 'financial'):
                         return data.copy()  # 返回副本，避免外部修改影响缓存
                 return None
-            
-            # 内存缓存未加载，需要从文件加载
-            # 方式1：优先从集中文件读取（主要方式）
-            if self._is_cache_valid(self.financial_cache, 'financial'):
-                # 先检查文件是否损坏
-                if not self._is_excel_file_valid(self.financial_cache):
-                    # 文件损坏，尝试修复
-                    self._repair_corrupted_cache(self.financial_cache, 'financial')
-                    # 修复后如果文件仍不存在，跳过
-                    if not os.path.exists(self.financial_cache):
-                        pass
-                    else:
-                        # 修复后再次尝试读取
-                        try:
-                            df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                            # 确保code列是字符串格式
-                            if 'code' in df.columns:
-                                df['code'] = df['code'].astype(str).str.zfill(6)
-                            
-                            # 优化：一次性加载所有数据到内存缓存
-                            self._financial_cache_memory = {}
-                            for _, row in df.iterrows():
-                                code = str(row['code']).zfill(6)
-                                data = row.to_dict()
-                                if self._is_data_valid(data, 'financial'):
-                                    self._financial_cache_memory[code] = data
-                            
-                            # 从内存缓存获取当前股票的数据
-                            data = self._financial_cache_memory.get(stock_code)
-                            if data is not None:
-                                return data.copy()  # 返回副本
-                        except Exception as e:
-                            # 修复后仍然失败，删除文件
-                            try:
-                                os.remove(self.financial_cache)
-                            except:
-                                pass
-            else:
-                # 文件不存在或已过期，先检查文件是否存在
-                if not os.path.exists(self.financial_cache):
-                    # 文件不存在，直接返回None，不需要尝试读取或修复
-                    return None
-                
-                # 文件存在但已过期，尝试读取（可能是刚过期的有效数据）
+
+            # 内存缓存未加载，需要从数据库加载
+            if self._is_cache_valid('financial', stock_code):
                 try:
-                    df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                    # 确保code列是字符串格式
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
-                    
-                    # 优化：一次性加载所有数据到内存缓存
-                    self._financial_cache_memory = {}
-                    for _, row in df.iterrows():
-                        code = str(row['code']).zfill(6)
-                        data = row.to_dict()
-                        if self._is_data_valid(data, 'financial'):
-                            self._financial_cache_memory[code] = data
-                    
-                    # 从内存缓存获取当前股票的数据
-                    data = self._financial_cache_memory.get(stock_code)
-                    if data is not None:
-                        return data.copy()  # 返回副本
-                except FileNotFoundError:
-                    # 文件不存在（可能在检查后被删除），直接返回None
-                    return None
+                    with sqlite3.connect(self.db_path) as conn:
+                        # 查询所有财务数据到内存缓存
+                        df = pd.read_sql_query('''
+                            SELECT * FROM financial_data
+                            WHERE update_time >= datetime('now', '-7 day')
+                        ''', conn)
+
+                        # 加载到内存缓存
+                        self._financial_cache_memory = {}
+                        for _, row in df.iterrows():
+                            code = str(row['code']).zfill(6)
+                            data = row.to_dict()
+                            # 移除数据库特有的字段
+                            data.pop('created_time', None)
+                            if self._is_data_valid(data, 'financial'):
+                                self._financial_cache_memory[code] = data
+
+                        # 从内存缓存获取当前股票的数据
+                        data = self._financial_cache_memory.get(stock_code)
+                        if data is not None:
+                            return data.copy()  # 返回副本
+
                 except Exception as e:
-                    # 读取失败，可能是文件损坏，尝试修复
-                    print(f"读取财务集中缓存失败: {e}")
-                    self._repair_corrupted_cache(self.financial_cache, 'financial')
-        
-        # 方式2：从独立文件读取（兼容旧数据，已迁移到meta目录，不再使用）
-        # 旧数据已迁移到meta目录，不再读取独立文件
-        
+                    print(f"读取财务缓存失败: {e}")
+                    # 清除内存缓存，避免下次继续失败
+                    self._financial_cache_memory = None
+
         return None
     
     def save_financial(self, stock_code: str, data: Dict):
         """
-        保存财务数据到缓存（优化策略：只有一行数据的合并到集中文件，多行数据才用独立文件）
+        保存财务数据到缓存
         Args:
             stock_code: 股票代码
             data: 财务数据
         """
-        # 使用文件锁防止并发写入
-        with self._file_locks['financial']:
+        # 使用数据库锁防止并发写入
+        with self._db_locks['financial']:
             try:
                 # 验证数据有效性
                 if not self._is_data_valid(data, 'financial'):
                     return  # 无效数据不保存
-                
-                data_to_save = data.copy()
-                data_to_save['code'] = stock_code
-                data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                # 财务数据只有一行，直接保存到集中文件（不创建独立文件）
-                # 先检查文件是否损坏
-                if os.path.exists(self.financial_cache):
-                    if not self._is_excel_file_valid(self.financial_cache):
-                        # 文件损坏，尝试修复
-                        self._repair_corrupted_cache(self.financial_cache, 'financial')
-                        # 如果修复失败，创建新文件
-                        if not os.path.exists(self.financial_cache) or not self._is_excel_file_valid(self.financial_cache):
-                            df = pd.DataFrame()
-                        else:
-                            df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                    else:
-                        df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                    # 确保code列是字符串格式
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
-                    # 移除旧数据
-                    df = df[df['code'] != stock_code]
-                else:
-                    df = pd.DataFrame()
-                
-                new_row = pd.DataFrame([data_to_save])
-                # 如果 df 为空或 None，直接使用 new_row；否则使用 concat
-                if df is None or df.empty or len(df) == 0:
-                    df = new_row
-                else:
-                    # 确保列对齐，避免 FutureWarning
-                    if not df.columns.equals(new_row.columns):
-                        # 统一列顺序和类型
-                        all_columns = list(df.columns) + [col for col in new_row.columns if col not in df.columns]
-                        df = df.reindex(columns=all_columns)
-                        new_row = new_row.reindex(columns=all_columns)
-                    df = pd.concat([df, new_row], ignore_index=True, sort=False)
-                
-                # 使用临时文件写入，避免写入过程中文件损坏
-                # 使用.xlsx扩展名，pandas才能正确识别文件类型
-                temp_file = self.financial_cache.replace('.xlsx', '_temp.xlsx')
-                try:
-                    # 写入临时文件
-                    df.to_excel(temp_file, index=False, engine='openpyxl')
-                    # 确保写入完成，文件句柄关闭
-                    del df
-                    time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
-                    
-                    # 删除原文件（带重试机制）
-                    max_retries = 5
-                    for attempt in range(max_retries):
-                        try:
-                            if os.path.exists(self.financial_cache):
-                                os.remove(self.financial_cache)
-                            break
-                        except PermissionError:
-                            if attempt < max_retries - 1:
-                                time.sleep(0.2)  # 等待文件句柄释放
-                            else:
-                                raise
-                    
-                    # 重命名临时文件
-                    os.rename(temp_file, self.financial_cache)
-                    
+
+                stock_code = str(stock_code).zfill(6)
+                update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+
+                    # 插入或更新数据
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO financial_data
+                        (code, roe, update_time)
+                        VALUES (?, ?, ?)
+                    ''', (
+                        stock_code,
+                        data.get('roe'),
+                        update_time
+                    ))
+
+                    conn.commit()
+
                     # 优化：更新内存缓存（如果已加载）
                     with self._financial_cache_lock:
                         if self._financial_cache_memory is not None:
                             # 更新内存缓存中的数据
-                            clean_code = str(stock_code).zfill(6)
-                            # 移除 update_time 和 code，保持与读取时一致
                             cache_data = data.copy()
-                            self._financial_cache_memory[clean_code] = cache_data
-                except Exception as e:
-                    # 如果写入失败，删除临时文件
-                    if os.path.exists(temp_file):
-                        try:
-                            os.remove(temp_file)
-                        except:
-                            pass
-                    raise e
-                
-                # 旧数据已迁移到meta目录，不再使用独立文件
+                            self._financial_cache_memory[stock_code] = cache_data
+
             except Exception as e:
                 print(f"保存财务缓存失败: {e}")
     
     def batch_save_financial(self, data_dict: Dict[str, Dict]):
         """
-        批量保存财务数据（提高效率，减少IO操作，只保存到集中文件）
+        批量保存财务数据（提高效率，使用SQLite事务）
         Args:
             data_dict: {stock_code: data_dict} 字典
         """
         if not data_dict:
             return
-        
-        # 使用文件锁防止并发写入
-        with self._file_locks['financial']:
+
+        # 添加重试机制处理并发冲突
+        max_batch_retries = 3
+        for batch_attempt in range(max_batch_retries):
             try:
-                # 读取现有集中文件
-                df = None
-                if os.path.exists(self.financial_cache):
-                    # 检查文件是否损坏
-                    if not self._is_excel_file_valid(self.financial_cache):
-                        # 文件损坏，尝试修复
-                        self._repair_corrupted_cache(self.financial_cache, 'financial')
-                        # 如果修复失败，创建新文件
-                        if not os.path.exists(self.financial_cache) or not self._is_excel_file_valid(self.financial_cache):
-                            df = pd.DataFrame()
-                        else:
-                            df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                    else:
-                        df = pd.read_excel(self.financial_cache, engine='openpyxl')
-                    # 确保code列是字符串格式
-                    if 'code' in df.columns:
-                        df['code'] = df['code'].astype(str).str.zfill(6)
-                    # 移除要更新的股票旧数据
-                    existing_codes = set(str(code).zfill(6) for code in data_dict.keys())
-                    df = df[~df['code'].isin(existing_codes)]
-                else:
-                    df = pd.DataFrame()
-                
-                # 准备新数据（只保存到集中文件，不创建独立文件）
-                new_rows = []
-                for stock_code, data in data_dict.items():
-                    # 验证数据有效性
-                    if not self._is_data_valid(data, 'financial'):
-                        continue
-                    
-                    data_to_save = data.copy()
-                    data_to_save['code'] = str(stock_code).zfill(6)
-                    data_to_save['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    new_rows.append(data_to_save)
-                
-                # 批量更新集中文件（使用临时文件，避免写入过程中文件损坏）
-                if new_rows:
-                    new_df = pd.DataFrame(new_rows)
-                    # 如果 df 为空，直接使用 new_df；否则确保列对齐后 concat
-                    if df is None or df.empty or len(df) == 0:
-                        df = new_df
-                    else:
-                        # 确保列对齐，避免 FutureWarning
-                        if not df.columns.equals(new_df.columns):
-                            # 统一列顺序和类型
-                            all_columns = list(df.columns) + [col for col in new_df.columns if col not in df.columns]
-                            df = df.reindex(columns=all_columns)
-                            new_df = new_df.reindex(columns=all_columns)
-                        df = pd.concat([df, new_df], ignore_index=True)
-                    # 使用.xlsx扩展名，pandas才能正确识别文件类型
-                    temp_file = self.financial_cache.replace('.xlsx', '_temp.xlsx')
-                    try:
-                        # 写入临时文件
-                        df.to_excel(temp_file, index=False, engine='openpyxl')
-                        # 确保写入完成，文件句柄关闭
-                        del df
-                        time.sleep(0.1)  # 短暂延迟，确保文件句柄释放
-                        
-                        # 删除原文件（带重试机制）
-                        max_retries = 5
-                        for attempt in range(max_retries):
-                            try:
-                                if os.path.exists(self.financial_cache):
-                                    os.remove(self.financial_cache)
-                                break
-                            except PermissionError:
-                                if attempt < max_retries - 1:
-                                    time.sleep(0.2)  # 等待文件句柄释放
-                                else:
-                                    raise
-                        
-                        # 重命名临时文件
-                        os.rename(temp_file, self.financial_cache)
-                        
-                        # 优化：更新内存缓存（如果已加载）
-                        with self._financial_cache_lock:
-                            if self._financial_cache_memory is not None:
-                                # 更新内存缓存中的数据
-                                for stock_code, data in data_dict.items():
-                                    clean_code = str(stock_code).zfill(6)
-                                    if self._is_data_valid(data, 'financial'):
-                                        cache_data = data.copy()
-                                        self._financial_cache_memory[clean_code] = cache_data
-                    except Exception as e:
-                        # 如果写入失败，删除临时文件
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except:
-                                pass
-                        raise e
+                # 使用数据库锁防止并发写入
+                with self._db_locks['financial']:
+                    update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+                    with sqlite3.connect(self.db_path) as conn:
+                        cursor = conn.cursor()
+
+                        # 准备批量插入数据
+                        data_to_insert = []
+                        for stock_code, data in data_dict.items():
+                            # 验证数据有效性
+                            if not self._is_data_valid(data, 'financial'):
+                                continue
+
+                            stock_code = str(stock_code).zfill(6)
+                            data_to_insert.append((
+                                stock_code,
+                                data.get('roe'),
+                                update_time
+                            ))
+
+                        if data_to_insert:
+                            # 使用INSERT OR REPLACE进行批量更新
+                            cursor.executemany('''
+                                INSERT OR REPLACE INTO financial_data
+                                (code, roe, update_time)
+                                VALUES (?, ?, ?)
+                            ''', data_to_insert)
+
+                            conn.commit()
+
+                            # 优化：更新内存缓存（如果已加载）
+                            with self._financial_cache_lock:
+                                if self._financial_cache_memory is not None:
+                                    # 更新内存缓存中的数据
+                                    for stock_code, data in data_dict.items():
+                                        clean_code = str(stock_code).zfill(6)
+                                        if self._is_data_valid(data, 'financial'):
+                                            cache_data = data.copy()
+                                            self._financial_cache_memory[clean_code] = cache_data
+
+                break  # 成功后退出重试循环
+
             except Exception as e:
-                print(f"批量保存财务缓存失败: {e}")
+                print(f"批量保存财务缓存失败 (尝试 {batch_attempt + 1}/{max_batch_retries}): {e}")
+                # 记录更详细的错误信息
+                import traceback
+                print(f"错误详情: {traceback.format_exc()}")
+
+                # 如果不是最后一次尝试，等待后重试
+                if batch_attempt < max_batch_retries - 1:
+                    wait_time = (batch_attempt + 1) * 0.5  # 递增等待时间
+                    print(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # 最后一次尝试失败，记录错误但不抛出异常
+                    print(f"批量保存财务缓存失败，已达到最大重试次数: {e}")
+                    return
     
     def get_stock_sectors(self, stock_code: str, force_refresh: bool = False) -> Optional[List[str]]:
         """
@@ -845,40 +619,42 @@ class CacheManager:
         Returns:
             板块列表，如果缓存中没有数据返回None，如果缓存中保存了空列表返回[]
         """
-        if not force_refresh and self._is_cache_valid(self.sectors_cache, 'sectors'):
-            try:
-                # 检查文件是否损坏
-                if not self._is_excel_file_valid(self.sectors_cache):
-                    # 文件损坏，尝试修复
-                    self._repair_corrupted_cache(self.sectors_cache, 'sectors')
-                    # 如果修复失败，返回None
-                    if not os.path.exists(self.sectors_cache) or not self._is_excel_file_valid(self.sectors_cache):
-                        return None
-                
-                df = pd.read_excel(self.sectors_cache, engine='openpyxl')
-                # 确保code列是字符串格式
-                if 'code' in df.columns:
-                    df['code'] = df['code'].astype(str).str.zfill(6)
-                stock_data = df[df['code'] == stock_code]
-                if not stock_data.empty:
-                    sectors_str = stock_data.iloc[0].get('sectors', '')
+        if force_refresh:
+            return None
+
+        stock_code = str(stock_code).zfill(6)
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 查询板块数据
+                cursor.execute('''
+                    SELECT sectors, update_time FROM stock_sectors
+                    WHERE code = ? AND update_time >= datetime('now', '-7 day')
+                ''', (stock_code,))
+
+                result = cursor.fetchone()
+                if result:
+                    sectors_str, update_time_str = result
+
                     # 如果sectors字段存在但为空字符串，说明之前保存了空列表
                     if sectors_str == '':
                         # 检查缓存时间，如果超过3天，返回None让fetcher重新获取
-                        update_time_str = stock_data.iloc[0].get('update_time', '')
-                        if update_time_str:
-                            try:
-                                update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
-                                days_old = (datetime.now() - update_time).days
-                                if days_old > 3:  # 空列表缓存超过3天，重新获取
-                                    return None
-                            except:
-                                pass
+                        try:
+                            update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
+                            days_old = (datetime.now() - update_time).days
+                            if days_old > 3:  # 空列表缓存超过3天，重新获取
+                                return None
+                        except:
+                            pass
                         return []
                     # 如果sectors字段有值，返回解析后的列表
                     return sectors_str.split(',') if sectors_str else []
-            except Exception as e:
-                print(f"读取板块缓存失败: {e}")
+
+        except Exception as e:
+            print(f"读取板块缓存失败: {e}")
+
         # 缓存中没有数据，返回None
         return None
     
@@ -889,95 +665,29 @@ class CacheManager:
             stock_code: 股票代码
             sectors: 板块列表（空列表也会保存，用于标记该股票确实没有板块信息）
         """
-        # 使用文件锁防止并发写入
-        with self._file_locks['sectors']:
+        # 使用数据库锁防止并发写入
+        with self._db_locks['sectors']:
             try:
-                df = None
-                if os.path.exists(self.sectors_cache):
-                    # 检查文件是否损坏
-                    if not self._is_excel_file_valid(self.sectors_cache):
-                        # 文件损坏，尝试修复
-                        self._repair_corrupted_cache(self.sectors_cache, 'sectors')
-                        # 如果修复失败，创建新文件
-                        if not os.path.exists(self.sectors_cache) or not self._is_excel_file_valid(self.sectors_cache):
-                            df = pd.DataFrame()
-                        else:
-                            try:
-                                df = pd.read_excel(self.sectors_cache, engine='openpyxl')
-                            except:
-                                df = pd.DataFrame()
-                    else:
-                        # 文件有效，正常读取
-                        try:
-                            df = pd.read_excel(self.sectors_cache, engine='openpyxl')
-                        except Exception as e:
-                            # 读取失败，可能是文件损坏，尝试修复
-                            print(f"读取板块缓存失败，尝试修复: {e}")
-                            self._repair_corrupted_cache(self.sectors_cache, 'sectors')
-                            if os.path.exists(self.sectors_cache) and self._is_excel_file_valid(self.sectors_cache):
-                                try:
-                                    df = pd.read_excel(self.sectors_cache, engine='openpyxl')
-                                except:
-                                    df = pd.DataFrame()
-                            else:
-                                df = pd.DataFrame()
-                    
-                    if df is not None and not df.empty:
-                        # 确保code列是字符串格式
-                        if 'code' in df.columns:
-                            df['code'] = df['code'].astype(str).str.zfill(6)
-                        # 移除要更新的股票旧数据
-                        df = df[df['code'] != stock_code]
-                else:
-                    df = pd.DataFrame()
-                
-                new_row = pd.DataFrame([{
-                    'code': str(stock_code).zfill(6),
-                    'sectors': ','.join(sectors) if sectors else '',  # 空列表保存为空字符串
-                    'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }])
-                # 如果 df 为空或 None，直接使用 new_row；否则使用 concat
-                if df is None or df.empty or len(df) == 0:
-                    df = new_row
-                else:
-                    # 确保列对齐，避免 FutureWarning
-                    if not df.columns.equals(new_row.columns):
-                        # 统一列顺序和类型
-                        all_columns = list(df.columns) + [col for col in new_row.columns if col not in df.columns]
-                        df = df.reindex(columns=all_columns)
-                        new_row = new_row.reindex(columns=all_columns)
-                    df = pd.concat([df, new_row], ignore_index=True, sort=False)
-                
-                # 确保目录存在
-                os.makedirs(os.path.dirname(self.sectors_cache), exist_ok=True)
-                
-                # 写入临时文件，然后重命名（原子操作）
-                temp_file = self.sectors_cache.replace('.xlsx', '_temp.xlsx')
-                df.to_excel(temp_file, index=False, engine='openpyxl')
-                
-                # 删除旧文件并重命名临时文件
-                if os.path.exists(self.sectors_cache):
-                    try:
-                        os.remove(self.sectors_cache)
-                    except:
-                        pass
-                os.rename(temp_file, self.sectors_cache)
-                
+                stock_code = str(stock_code).zfill(6)
+                update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                sectors_str = ','.join(sectors) if sectors else ''  # 空列表保存为空字符串
+
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+
+                    # 插入或更新数据
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO stock_sectors
+                        (code, sectors, update_time)
+                        VALUES (?, ?, ?)
+                    ''', (stock_code, sectors_str, update_time))
+
+                    conn.commit()
+
             except Exception as e:
                 print(f"保存板块缓存失败: {e}")
                 import traceback
                 traceback.print_exc()
-                # 如果保存失败，尝试删除损坏的文件
-                if os.path.exists(self.sectors_cache):
-                    try:
-                        if not self._is_excel_file_valid(self.sectors_cache):
-                            backup_file = self.sectors_cache.replace('.xlsx', '_backup.xlsx')
-                            try:
-                                os.rename(self.sectors_cache, backup_file)
-                            except:
-                                pass
-                    except:
-                        pass
     
     def get_stock_concepts(self, stock_code: str, force_refresh: bool = False) -> Optional[List[str]]:
         """
@@ -988,40 +698,42 @@ class CacheManager:
         Returns:
             概念列表，如果缓存中没有数据返回None，如果缓存中保存了空列表返回[]
         """
-        if not force_refresh and self._is_cache_valid(self.concepts_cache, 'concepts'):
-            try:
-                # 检查文件是否损坏
-                if not self._is_excel_file_valid(self.concepts_cache):
-                    # 文件损坏，尝试修复
-                    self._repair_corrupted_cache(self.concepts_cache, 'concepts')
-                    # 如果修复失败，返回None
-                    if not os.path.exists(self.concepts_cache) or not self._is_excel_file_valid(self.concepts_cache):
-                        return None
-                
-                df = pd.read_excel(self.concepts_cache, engine='openpyxl')
-                # 确保code列是字符串格式
-                if 'code' in df.columns:
-                    df['code'] = df['code'].astype(str).str.zfill(6)
-                stock_data = df[df['code'] == stock_code]
-                if not stock_data.empty:
-                    concepts_str = stock_data.iloc[0].get('concepts', '')
+        if force_refresh:
+            return None
+
+        stock_code = str(stock_code).zfill(6)
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 查询概念数据
+                cursor.execute('''
+                    SELECT concepts, update_time FROM stock_concepts
+                    WHERE code = ? AND update_time >= datetime('now', '-7 day')
+                ''', (stock_code,))
+
+                result = cursor.fetchone()
+                if result:
+                    concepts_str, update_time_str = result
+
                     # 如果concepts字段存在但为空字符串，说明之前保存了空列表
                     if concepts_str == '':
                         # 检查缓存时间，如果超过3天，返回None让fetcher重新获取
-                        update_time_str = stock_data.iloc[0].get('update_time', '')
-                        if update_time_str:
-                            try:
-                                update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
-                                days_old = (datetime.now() - update_time).days
-                                if days_old > 3:  # 空列表缓存超过3天，重新获取
-                                    return None
-                            except:
-                                pass
+                        try:
+                            update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
+                            days_old = (datetime.now() - update_time).days
+                            if days_old > 3:  # 空列表缓存超过3天，重新获取
+                                return None
+                        except:
+                            pass
                         return []
                     # 如果concepts字段有值，返回解析后的列表
                     return concepts_str.split(',') if concepts_str else []
-            except Exception as e:
-                print(f"读取概念缓存失败: {e}")
+
+        except Exception as e:
+            print(f"读取概念缓存失败: {e}")
+
         # 缓存中没有数据，返回None
         return None
     
@@ -1032,95 +744,29 @@ class CacheManager:
             stock_code: 股票代码
             concepts: 概念列表（空列表也会保存，用于标记该股票确实没有概念信息）
         """
-        # 使用文件锁防止并发写入
-        with self._file_locks['concepts']:
+        # 使用数据库锁防止并发写入
+        with self._db_locks['concepts']:
             try:
-                df = None
-                if os.path.exists(self.concepts_cache):
-                    # 检查文件是否损坏
-                    if not self._is_excel_file_valid(self.concepts_cache):
-                        # 文件损坏，尝试修复
-                        self._repair_corrupted_cache(self.concepts_cache, 'concepts')
-                        # 如果修复失败，创建新文件
-                        if not os.path.exists(self.concepts_cache) or not self._is_excel_file_valid(self.concepts_cache):
-                            df = pd.DataFrame()
-                        else:
-                            try:
-                                df = pd.read_excel(self.concepts_cache, engine='openpyxl')
-                            except:
-                                df = pd.DataFrame()
-                    else:
-                        # 文件有效，正常读取
-                        try:
-                            df = pd.read_excel(self.concepts_cache, engine='openpyxl')
-                        except Exception as e:
-                            # 读取失败，可能是文件损坏，尝试修复
-                            print(f"读取概念缓存失败，尝试修复: {e}")
-                            self._repair_corrupted_cache(self.concepts_cache, 'concepts')
-                            if os.path.exists(self.concepts_cache) and self._is_excel_file_valid(self.concepts_cache):
-                                try:
-                                    df = pd.read_excel(self.concepts_cache, engine='openpyxl')
-                                except:
-                                    df = pd.DataFrame()
-                            else:
-                                df = pd.DataFrame()
-                    
-                    if df is not None and not df.empty:
-                        # 确保code列是字符串格式
-                        if 'code' in df.columns:
-                            df['code'] = df['code'].astype(str).str.zfill(6)
-                        # 移除要更新的股票旧数据
-                        df = df[df['code'] != stock_code]
-                else:
-                    df = pd.DataFrame()
-                
-                new_row = pd.DataFrame([{
-                    'code': str(stock_code).zfill(6),
-                    'concepts': ','.join(concepts) if concepts else '',  # 空列表保存为空字符串
-                    'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }])
-                # 如果 df 为空或 None，直接使用 new_row；否则使用 concat
-                if df is None or df.empty or len(df) == 0:
-                    df = new_row
-                else:
-                    # 确保列对齐，避免 FutureWarning
-                    if not df.columns.equals(new_row.columns):
-                        # 统一列顺序和类型
-                        all_columns = list(df.columns) + [col for col in new_row.columns if col not in df.columns]
-                        df = df.reindex(columns=all_columns)
-                        new_row = new_row.reindex(columns=all_columns)
-                    df = pd.concat([df, new_row], ignore_index=True, sort=False)
-                
-                # 确保目录存在
-                os.makedirs(os.path.dirname(self.concepts_cache), exist_ok=True)
-                
-                # 写入临时文件，然后重命名（原子操作）
-                temp_file = self.concepts_cache.replace('.xlsx', '_temp.xlsx')
-                df.to_excel(temp_file, index=False, engine='openpyxl')
-                
-                # 删除旧文件并重命名临时文件
-                if os.path.exists(self.concepts_cache):
-                    try:
-                        os.remove(self.concepts_cache)
-                    except:
-                        pass
-                os.rename(temp_file, self.concepts_cache)
-                
+                stock_code = str(stock_code).zfill(6)
+                update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                concepts_str = ','.join(concepts) if concepts else ''  # 空列表保存为空字符串
+
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+
+                    # 插入或更新数据
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO stock_concepts
+                        (code, concepts, update_time)
+                        VALUES (?, ?, ?)
+                    ''', (stock_code, concepts_str, update_time))
+
+                    conn.commit()
+
             except Exception as e:
                 print(f"保存概念缓存失败: {e}")
                 import traceback
                 traceback.print_exc()
-                # 如果保存失败，尝试删除损坏的文件
-                if os.path.exists(self.concepts_cache):
-                    try:
-                        if not self._is_excel_file_valid(self.concepts_cache):
-                            backup_file = self.concepts_cache.replace('.xlsx', '_backup.xlsx')
-                            try:
-                                os.rename(self.concepts_cache, backup_file)
-                            except:
-                                pass
-                    except:
-                        pass
     
     def get_stock_list(self, force_refresh: bool = False) -> Optional[pd.DataFrame]:
         """
@@ -1130,17 +776,28 @@ class CacheManager:
         Returns:
             股票列表DataFrame
         """
-        if not force_refresh and self._is_cache_valid(self.stock_list_cache, 'stock_list'):
-            try:
-                df = pd.read_excel(self.stock_list_cache, engine='openpyxl')
-                # 确保代码是字符串类型，并格式化为6位（补零）
-                if 'code' in df.columns:
-                    df['code'] = df['code'].astype(str).str.zfill(6)
-                return df
-            except Exception as e:
-                print(f"读取股票列表缓存失败: {e}")
+        if force_refresh:
+            return None
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 查询有效的股票列表（未过期）
+                df = pd.read_sql_query('''
+                    SELECT * FROM stock_list
+                    WHERE update_time >= datetime('now', '-1 day')
+                ''', conn)
+
+                if not df.empty:
+                    # 确保代码是字符串类型，并格式化为6位（补零）
+                    if 'code' in df.columns:
+                        df['code'] = df['code'].astype(str).str.zfill(6)
+                    return df
+
+        except Exception as e:
+            print(f"读取股票列表缓存失败: {e}")
+
         return None
-    
+
     def save_stock_list(self, stock_list: pd.DataFrame):
         """
         保存股票列表到缓存
@@ -1152,11 +809,41 @@ class CacheManager:
             stock_list = stock_list.copy()
             if 'code' in stock_list.columns:
                 stock_list['code'] = stock_list['code'].astype(str).str.zfill(6)
-            stock_list.to_excel(self.stock_list_cache, index=False, engine='openpyxl')
+
+            update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 清空现有数据
+                cursor.execute('DELETE FROM stock_list')
+
+                # 准备插入数据
+                data_to_insert = []
+                for _, row in stock_list.iterrows():
+                    data_to_insert.append((
+                        row.get('code'),
+                        row.get('name'),
+                        row.get('market'),
+                        row.get('area'),
+                        row.get('industry'),
+                        row.get('list_date'),
+                        update_time
+                    ))
+
+                # 批量插入
+                cursor.executemany('''
+                    INSERT INTO stock_list
+                    (code, name, market, area, industry, list_date, update_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', data_to_insert)
+
+                conn.commit()
+
         except Exception as e:
             print(f"保存股票列表缓存失败: {e}")
     
-    def get_kline(self, symbol: str, cache_type: str = 'stock', 
+    def get_kline(self, symbol: str, cache_type: str = 'stock',
                   period: str = 'daily', force_refresh: bool = False) -> Optional[pd.DataFrame]:
         """
         从缓存获取K线数据（智能检查最新交易日数据）
@@ -1170,33 +857,40 @@ class CacheManager:
         """
         if force_refresh:
             return None
-        
-        cache_file = self._get_kline_cache_path(symbol, cache_type, period)
-        if self._is_cache_valid(cache_file, 'kline'):
-            try:
-                df = pd.read_excel(cache_file, engine='openpyxl')
-                # 确保date列是datetime类型（处理日期格式）
-                if 'date' in df.columns:
-                    df['date'] = pd.to_datetime(df['date']).dt.date
-                    df['date'] = pd.to_datetime(df['date'])
-                    # 检查最新交易日数据是否存在
-                    latest_date = df['date'].max()
-                    today = datetime.now().date()
-                    # 如果最新数据是今天或昨天（考虑交易日），则可以使用缓存
-                    if isinstance(latest_date, pd.Timestamp):
-                        latest_date_date = latest_date.date()
-                    else:
-                        latest_date_date = latest_date
-                    if latest_date_date >= today - timedelta(days=1):
-                        return df
-                    # 否则返回None，需要重新下载
-                else:
-                    return df
-            except Exception as e:
-                print(f"读取K线缓存失败 ({symbol}): {e}")
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 查询K线数据
+                df = pd.read_sql_query('''
+                    SELECT symbol, date, open, high, low, close, volume, amount
+                    FROM kline_data
+                    WHERE symbol = ? AND cache_type = ? AND period = ?
+                    AND update_time >= datetime('now', '-1 day')
+                    ORDER BY date
+                ''', conn, params=(symbol, cache_type, period))
+
+                if not df.empty:
+                    # 确保date列是datetime类型
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        # 检查最新交易日数据是否存在
+                        latest_date = df['date'].max()
+                        today = datetime.now().date()
+                        # 如果最新数据是今天或昨天（考虑交易日），则可以使用缓存
+                        if isinstance(latest_date, pd.Timestamp):
+                            latest_date_date = latest_date.date()
+                        else:
+                            latest_date_date = latest_date.date() if hasattr(latest_date, 'date') else latest_date
+
+                        if latest_date_date >= today - timedelta(days=1):
+                            return df
+
+        except Exception as e:
+            print(f"读取K线缓存失败 ({symbol}): {e}")
+
         return None
     
-    def has_latest_trading_day_data(self, symbol: str, cache_type: str = 'stock', 
+    def has_latest_trading_day_data(self, symbol: str, cache_type: str = 'stock',
                                     period: str = 'daily') -> bool:
         """
         检查是否有最新交易日的数据（用于智能跳过下载）
@@ -1207,22 +901,27 @@ class CacheManager:
         Returns:
             是否有最新交易日数据
         """
-        cache_file = self._get_kline_cache_path(symbol, cache_type, period)
-        if not os.path.exists(cache_file):
-            return False
-        
         try:
-            df = pd.read_excel(cache_file, engine='openpyxl')
-            if df.empty:
-                return False
-            
-            if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
-                latest_date = df['date'].max()
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 查询最新的数据日期
+                cursor.execute('''
+                    SELECT MAX(date) FROM kline_data
+                    WHERE symbol = ? AND cache_type = ? AND period = ?
+                    AND update_time >= datetime('now', '-1 day')
+                ''', (symbol, cache_type, period))
+
+                result = cursor.fetchone()
+                if not result or not result[0]:
+                    return False
+
+                latest_date_str = result[0]
+                latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d').date()
                 today = datetime.now().date()
                 current_time = datetime.now().time()
                 weekday = datetime.now().weekday()
-                
+
                 # 判断是否应该使用昨天的数据
                 # 如果当前在交易时间内，使用昨天的数据（今天数据不完整）
                 use_yesterday = False
@@ -1235,7 +934,7 @@ class CacheManager:
                     use_yesterday = True
                 elif datetime.strptime('11:30', '%H:%M').time() < current_time < datetime.strptime('13:00', '%H:%M').time():  # 午休
                     use_yesterday = True
-                
+
                 # 如果应该使用昨天的数据，检查是否有昨天的数据
                 if use_yesterday:
                     # 需要昨天或更早的完整数据
@@ -1243,18 +942,17 @@ class CacheManager:
                     # 确保不是周末
                     while yesterday.weekday() >= 5:
                         yesterday = yesterday - timedelta(days=1)
-                    return latest_date.date() >= yesterday
+                    return latest_date >= yesterday
                 else:
                     # 可以使用今天的数据（收盘后）
-                    return latest_date.date() >= today - timedelta(days=1)
-            else:
-                # 如果没有date列，检查文件修改时间
-                return self._is_cache_valid(cache_file, 'kline')
-        except:
+                    return latest_date >= today - timedelta(days=1)
+
+        except Exception as e:
+            print(f"检查K线数据有效性失败 ({symbol}): {e}")
             return False
     
-    def save_kline(self, symbol: str, data: pd.DataFrame, 
-                   cache_type: str = 'stock', period: str = 'daily', 
+    def save_kline(self, symbol: str, data: pd.DataFrame,
+                   cache_type: str = 'stock', period: str = 'daily',
                    incremental: bool = True):
         """
         保存K线数据到缓存（支持增量更新和自动清理）
@@ -1268,126 +966,67 @@ class CacheManager:
         try:
             if data is None or data.empty:
                 return
-            
-            cache_file = self._get_kline_cache_path(symbol, cache_type, period)
-            
-            # 确保date列存在并转换为日期类型（不包含时间）
-            if 'date' in data.columns:
-                data_to_save = data.copy()
-                # 将日期转换为只包含日期部分（不包含时间）
-                data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.date
-            else:
-                data_to_save = data.copy()
-                if '日期' in data.columns:
-                    data_to_save['date'] = pd.to_datetime(data['日期']).dt.date
-            
-            # 增量更新：合并现有缓存数据
-            if incremental and os.path.exists(cache_file):
-                try:
-                    existing_df = pd.read_excel(cache_file, engine='openpyxl')
-                    if not existing_df.empty and 'date' in existing_df.columns:
-                        # 确保date列是日期类型（不包含时间）
-                        existing_df['date'] = pd.to_datetime(existing_df['date']).dt.date
-                        data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.date if isinstance(data_to_save['date'].iloc[0], str) else data_to_save['date']
-                        
-                        # 合并数据：保留旧数据，用新数据更新或追加
-                        # 移除旧数据中与新数据日期重复的记录
-                        existing_df = existing_df[~existing_df['date'].isin(data_to_save['date'])]
-                        
-                        # 如果过滤后 existing_df 为空，直接使用新数据；否则合并
-                        if existing_df.empty or len(existing_df) == 0:
-                            # existing_df 为空，直接使用新数据
-                            pass
-                        else:
-                            # 确保列对齐，避免 FutureWarning
-                            if not existing_df.columns.equals(data_to_save.columns):
-                                # 统一列顺序和类型
-                                all_columns = list(existing_df.columns) + [col for col in data_to_save.columns if col not in existing_df.columns]
-                                existing_df = existing_df.reindex(columns=all_columns)
-                                data_to_save = data_to_save.reindex(columns=all_columns)
-                            # 合并新旧数据
-                            data_to_save = pd.concat([existing_df, data_to_save], ignore_index=True)
-                        
-                        # 按日期排序并去重（保留最新的）
-                        data_to_save = data_to_save.sort_values('date').drop_duplicates(subset=['date'], keep='last')
-                except Exception as e:
-                    # 如果读取现有缓存失败，直接使用新数据
-                    print(f"读取现有K线缓存失败，使用新数据覆盖 ({symbol}): {e}")
-            
-            # 数据清理：只保留最近N天的数据（可配置）
-            if 'date' in data_to_save.columns and not data_to_save.empty:
+
+            # 准备数据
+            data_to_save = data.copy()
+
+            # 确保date列存在并转换为日期字符串格式
+            if 'date' in data_to_save.columns:
+                data_to_save['date'] = pd.to_datetime(data_to_save['date']).dt.strftime('%Y-%m-%d')
+            elif '日期' in data_to_save.columns:
+                data_to_save['date'] = pd.to_datetime(data_to_save['日期']).dt.strftime('%Y-%m-%d')
+                # 重命名列
+                data_to_save = data_to_save.rename(columns={'日期': 'date'})
+
+            update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # 如果不是增量更新，先删除现有数据
+                if not incremental:
+                    cursor.execute('''
+                        DELETE FROM kline_data
+                        WHERE symbol = ? AND cache_type = ? AND period = ?
+                    ''', (symbol, cache_type, period))
+
+                # 准备插入数据
+                data_to_insert = []
+                for _, row in data_to_save.iterrows():
+                    data_to_insert.append((
+                        symbol,
+                        cache_type,
+                        period,
+                        row.get('date'),
+                        row.get('open'),
+                        row.get('high'),
+                        row.get('low'),
+                        row.get('close'),
+                        row.get('volume'),
+                        row.get('amount'),
+                        update_time
+                    ))
+
+                # 批量插入（INSERT OR REPLACE处理重复数据）
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO kline_data
+                    (symbol, cache_type, period, date, open, high, low, close, volume, amount, update_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', data_to_insert)
+
+                # 数据清理：只保留最近N天的数据
                 retention_days = getattr(config, 'KLINE_CACHE_RETENTION_DAYS', 250)
-                # 确保date列是datetime类型
-                data_to_save['date'] = pd.to_datetime(data_to_save['date'])
-                # 获取最新日期
-                latest_date = data_to_save['date'].max()
-                if isinstance(latest_date, pd.Timestamp):
-                    latest_date = latest_date.date()
-                elif hasattr(latest_date, 'date'):
-                    latest_date = latest_date.date()
-                else:
-                    latest_date = pd.to_datetime(latest_date).date()
-                
-                # 计算保留日期范围
-                cutoff_date = latest_date - timedelta(days=retention_days)
-                
-                # 过滤数据：只保留最近N天的数据
-                data_to_save = data_to_save[data_to_save['date'].dt.date >= cutoff_date].copy()
-                
-                # 将日期转换回日期格式（不包含时间）用于保存
-                data_to_save['date'] = data_to_save['date'].dt.date
-            
-            # 保存到缓存（使用openpyxl引擎，确保日期格式正确）
-            if not data_to_save.empty:
-                # 先保存为Excel
-                data_to_save.to_excel(cache_file, index=False, engine='openpyxl')
-                
-                # 设置日期列的格式为日期（不包含时间）
-                try:
-                    wb = load_workbook(cache_file)
-                    ws = wb.active
-                    # 找到date列的索引
-                    if 'date' in data_to_save.columns:
-                        date_col_idx = list(data_to_save.columns).index('date') + 1
-                        # 设置日期格式（只显示日期，不显示时间）
-                        date_style = NamedStyle(name='date_style', number_format='YYYY-MM-DD')
-                        for row in range(2, ws.max_row + 1):  # 跳过标题行
-                            cell = ws.cell(row=row, column=date_col_idx)
-                            if cell.value:
-                                # 确保单元格格式为日期
-                                cell.number_format = 'YYYY-MM-DD'
-                    wb.save(cache_file)
-                    wb.close()
-                except Exception as e:
-                    # 如果格式化失败，不影响数据保存
-                    pass
+                cursor.execute('''
+                    DELETE FROM kline_data
+                    WHERE symbol = ? AND cache_type = ? AND period = ?
+                    AND date < datetime('now', '-{} days')
+                '''.format(retention_days), (symbol, cache_type, period))
+
+                conn.commit()
+
         except Exception as e:
             print(f"保存K线缓存失败 ({symbol}): {e}")
     
-    def _get_kline_cache_path(self, symbol: str, cache_type: str, period: str) -> str:
-        """
-        获取K线缓存文件路径
-        Args:
-            symbol: 股票代码/板块名称/概念名称
-            cache_type: 缓存类型 ('stock', 'sector', 'concept')
-            period: 周期 ('daily', 'weekly', 'monthly')
-        Returns:
-            缓存文件路径
-        """
-        # 清理symbol中的特殊字符，用于文件名
-        safe_symbol = str(symbol).replace('/', '_').replace('\\', '_').replace(':', '_')
-        
-        # 所有K线数据统一放在kline目录下，通过文件名前缀区分类型
-        if cache_type == 'stock':
-            filename = f"stock_{safe_symbol}_{period}.xlsx"
-        elif cache_type == 'sector':
-            filename = f"sector_{safe_symbol}_{period}.xlsx"
-        elif cache_type == 'concept':
-            filename = f"concept_{safe_symbol}_{period}.xlsx"
-        else:
-            filename = f"{cache_type}_{safe_symbol}_{period}.xlsx"
-        
-        return os.path.join(self.kline_cache_dir, filename)
     
     def check_cache_completeness(self, stock_codes: List[str], 
                                 data_types: List[str] = None) -> Dict[str, Dict]:
@@ -1442,87 +1081,58 @@ class CacheManager:
                        'concepts': 清除概念缓存
                        'stock_list': 清除股票列表缓存
         """
-        if cache_type is None:
-            # 清除所有缓存
-            import shutil
-            try:
-                # 清除K线缓存
-                if os.path.exists(self.kline_cache_dir):
-                    for filename in os.listdir(self.kline_cache_dir):
-                        file_path = os.path.join(self.kline_cache_dir, filename)
-                        try:
-                            if os.path.isfile(file_path):
-                                os.remove(file_path)
-                        except:
-                            pass
-                
-                # 清除meta目录下的缓存文件
-                if os.path.exists(self.meta_dir):
-                    for filename in os.listdir(self.meta_dir):
-                        if filename.endswith('.xlsx'):
-                            file_path = os.path.join(self.meta_dir, filename)
-                            try:
-                                os.remove(file_path)
-                            except:
-                                pass
-                
-                print("已清除所有缓存")
-            except Exception as e:
-                print(f"清除缓存失败: {e}")
-        elif cache_type == 'kline':
-            # 清除K线缓存
-            try:
-                if os.path.exists(self.kline_cache_dir):
-                    for filename in os.listdir(self.kline_cache_dir):
-                        file_path = os.path.join(self.kline_cache_dir, filename)
-                        try:
-                            if os.path.isfile(file_path):
-                                os.remove(file_path)
-                        except:
-                            pass
-                print("已清除K线缓存")
-            except Exception as e:
-                print(f"清除K线缓存失败: {e}")
-        elif cache_type == 'fundamental':
-            # 清除基本面缓存
-            try:
-                if os.path.exists(self.fundamental_cache):
-                    os.remove(self.fundamental_cache)
-                print("已清除基本面缓存")
-            except Exception as e:
-                print(f"清除基本面缓存失败: {e}")
-        elif cache_type == 'financial':
-            # 清除财务缓存
-            try:
-                if os.path.exists(self.financial_cache):
-                    os.remove(self.financial_cache)
-                print("已清除财务缓存")
-            except Exception as e:
-                print(f"清除财务缓存失败: {e}")
-        elif cache_type == 'sectors':
-            # 清除板块缓存
-            try:
-                if os.path.exists(self.sectors_cache):
-                    os.remove(self.sectors_cache)
-                print("已清除板块缓存")
-            except Exception as e:
-                print(f"清除板块缓存失败: {e}")
-        elif cache_type == 'concepts':
-            # 清除概念缓存
-            try:
-                if os.path.exists(self.concepts_cache):
-                    os.remove(self.concepts_cache)
-                print("已清除概念缓存")
-            except Exception as e:
-                print(f"清除概念缓存失败: {e}")
-        elif cache_type == 'stock_list':
-            # 清除股票列表缓存
-            try:
-                if os.path.exists(self.stock_list_cache):
-                    os.remove(self.stock_list_cache)
-                print("已清除股票列表缓存")
-            except Exception as e:
-                print(f"清除股票列表缓存失败: {e}")
-        else:
-            print(f"未知的缓存类型: {cache_type}")
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                if cache_type is None:
+                    # 清除所有缓存
+                    cursor.execute('DELETE FROM fundamental_data')
+                    cursor.execute('DELETE FROM financial_data')
+                    cursor.execute('DELETE FROM stock_sectors')
+                    cursor.execute('DELETE FROM stock_concepts')
+                    cursor.execute('DELETE FROM stock_list')
+                    cursor.execute('DELETE FROM kline_data')
+                    print("已清除所有缓存")
+
+                elif cache_type == 'kline':
+                    cursor.execute('DELETE FROM kline_data')
+                    print("已清除K线缓存")
+
+                elif cache_type == 'fundamental':
+                    cursor.execute('DELETE FROM fundamental_data')
+                    print("已清除基本面缓存")
+
+                elif cache_type == 'financial':
+                    cursor.execute('DELETE FROM financial_data')
+                    print("已清除财务缓存")
+
+                elif cache_type == 'sectors':
+                    cursor.execute('DELETE FROM stock_sectors')
+                    print("已清除板块缓存")
+
+                elif cache_type == 'concepts':
+                    cursor.execute('DELETE FROM stock_concepts')
+                    print("已清除概念缓存")
+
+                elif cache_type == 'stock_list':
+                    cursor.execute('DELETE FROM stock_list')
+                    print("已清除股票列表缓存")
+
+                else:
+                    print(f"未知的缓存类型: {cache_type}")
+                    return
+
+                conn.commit()
+
+                # 清除内存缓存
+                if cache_type is None or cache_type == 'fundamental':
+                    with self._fundamental_cache_lock:
+                        self._fundamental_cache_memory = None
+                if cache_type is None or cache_type == 'financial':
+                    with self._financial_cache_lock:
+                        self._financial_cache_memory = None
+
+        except Exception as e:
+            print(f"清除缓存失败: {e}")
 

@@ -12,14 +12,14 @@ class FundamentalScorer:
     def __init__(self):
         self.weights = config.FUNDAMENTAL_WEIGHTS
     
-    def score(self, fundamental_data: Dict, financial_data: Dict) -> float:
+    def score(self, fundamental_data: Dict, financial_data: Dict) -> dict:
         """
-        计算基本面综合得分
+        计算基本面综合得分和详细指标
         Args:
             fundamental_data: 基本面数据（PE、PB等）
             financial_data: 财务数据（ROE、增长率等）
         Returns:
-            综合得分 0-100
+            字典包含：score（综合得分）以及各项指标得分
         """
         scores = {}
         
@@ -111,8 +111,21 @@ class FundamentalScorer:
             scores['profit_growth'] = 50
         
         # 计算加权总分
-        total_score = sum(scores.get(key, 50) * self.weights.get(key, 0) 
+        total_score = sum(scores.get(key, 50) * self.weights.get(key, 0)
                          for key in self.weights.keys())
-        
-        return min(100, max(0, total_score))
+        total_score = min(100, max(0, total_score))
+
+        return {
+            'score': total_score,
+            'pe_ratio': pe_ratio,
+            'pb_ratio': pb_ratio,
+            'roe': roe,
+            'revenue_growth': revenue_growth,
+            'profit_growth': profit_growth,
+            'pe_ratio_score': scores.get('pe_ratio', 50),
+            'pb_ratio_score': scores.get('pb_ratio', 50),
+            'roe_score': scores.get('roe', 50),
+            'revenue_growth_score': scores.get('revenue_growth', 50),
+            'profit_growth_score': scores.get('profit_growth', 50)
+        }
 

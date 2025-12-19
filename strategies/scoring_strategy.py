@@ -73,9 +73,14 @@ class ScoringStrategy(BaseStrategy):
             # 4. 计算各维度得分
             if progress_callback:
                 progress_callback('loading', f"{stock_code} {stock_name}: 计算评分...")
-            fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
-            volume_score = self.volume_scorer.score(kline_data)
-            price_score = self.price_scorer.score(kline_data)
+            fundamental_result = self.fundamental_scorer.score(fundamental_data, financial_data)
+            volume_result = self.volume_scorer.score(kline_data)
+            price_result = self.price_scorer.score(kline_data)
+
+            # 提取综合得分
+            fundamental_score = fundamental_result['score']
+            volume_score = volume_result['score']
+            price_score = price_result['score']
             
             # 5. 计算综合得分
             total_score = (
@@ -98,9 +103,32 @@ class ScoringStrategy(BaseStrategy):
                 'price_score': round(price_score, 2),
                 'current_price': round(current_price, 2),
                 'current_volume': current_volume,
-                'pe_ratio': fundamental_data.get('pe_ratio', 0),
-                'pb_ratio': fundamental_data.get('pb_ratio', 0),
-                'roe': financial_data.get('roe', 0),
+                # 基本面详细指标
+                'pe_ratio': fundamental_result.get('pe_ratio'),
+                'pb_ratio': fundamental_result.get('pb_ratio'),
+                'roe': fundamental_result.get('roe'),
+                'revenue_growth': fundamental_result.get('revenue_growth'),
+                'profit_growth': fundamental_result.get('profit_growth'),
+                # 成交量详细指标
+                'volume_ratio': volume_result.get('volume_ratio'),
+                'turnover_rate': volume_result.get('turnover_rate'),
+                'volume_trend': volume_result.get('volume_trend'),
+                # 价格详细指标
+                'price_trend': price_result.get('price_trend'),
+                'price_position': price_result.get('price_position'),
+                'volatility': price_result.get('volatility'),
+                # 子维度得分（用于详细展示）
+                'pe_ratio_score': fundamental_result.get('pe_ratio_score', 50),
+                'pb_ratio_score': fundamental_result.get('pb_ratio_score', 50),
+                'roe_score': fundamental_result.get('roe_score', 50),
+                'revenue_growth_score': fundamental_result.get('revenue_growth_score', 50),
+                'profit_growth_score': fundamental_result.get('profit_growth_score', 50),
+                'volume_ratio_score': volume_result.get('volume_ratio_score', 50),
+                'turnover_rate_score': volume_result.get('turnover_rate_score', 50),
+                'volume_trend_score': volume_result.get('volume_trend_score', 50),
+                'price_trend_score': price_result.get('price_trend_score', 50),
+                'price_position_score': price_result.get('price_position_score', 50),
+                'volatility_score': price_result.get('volatility_score', 50),
             }
             
             if progress_callback:
@@ -488,10 +516,15 @@ class ScoringStrategy(BaseStrategy):
                     financial_data = data['financial_data']
                     
                     # 计算各维度得分
-                    fundamental_score = self.fundamental_scorer.score(fundamental_data, financial_data)
-                    volume_score = self.volume_scorer.score(kline_data)
-                    price_score = self.price_scorer.score(kline_data)
-                    
+                    fundamental_result = self.fundamental_scorer.score(fundamental_data, financial_data)
+                    volume_result = self.volume_scorer.score(kline_data)
+                    price_result = self.price_scorer.score(kline_data)
+
+                    # 提取综合得分
+                    fundamental_score = fundamental_result['score']
+                    volume_score = volume_result['score']
+                    price_score = price_result['score']
+
                     # 计算综合得分
                     total_score = (
                         fundamental_score * self.weights['fundamental'] +
@@ -513,10 +546,32 @@ class ScoringStrategy(BaseStrategy):
                         'price_score': round(price_score, 2),
                         'current_price': round(current_price, 2),
                         'current_volume': current_volume,
-                        # 保留None值，用于区分"数据缺失"和"数据为0"
-                        'pe_ratio': fundamental_data.get('pe_ratio'),
-                        'pb_ratio': fundamental_data.get('pb_ratio'),
-                        'roe': financial_data.get('roe'),
+                        # 基本面详细指标
+                        'pe_ratio': fundamental_result.get('pe_ratio'),
+                        'pb_ratio': fundamental_result.get('pb_ratio'),
+                        'roe': fundamental_result.get('roe'),
+                        'revenue_growth': fundamental_result.get('revenue_growth'),
+                        'profit_growth': fundamental_result.get('profit_growth'),
+                        # 成交量详细指标
+                        'volume_ratio': volume_result.get('volume_ratio'),
+                        'turnover_rate': volume_result.get('turnover_rate'),
+                        'volume_trend': volume_result.get('volume_trend'),
+                        # 价格详细指标
+                        'price_trend': price_result.get('price_trend'),
+                        'price_position': price_result.get('price_position'),
+                        'volatility': price_result.get('volatility'),
+                        # 子维度得分（用于详细展示）
+                        'pe_ratio_score': fundamental_result.get('pe_ratio_score', 50),
+                        'pb_ratio_score': fundamental_result.get('pb_ratio_score', 50),
+                        'roe_score': fundamental_result.get('roe_score', 50),
+                        'revenue_growth_score': fundamental_result.get('revenue_growth_score', 50),
+                        'profit_growth_score': fundamental_result.get('profit_growth_score', 50),
+                        'volume_ratio_score': volume_result.get('volume_ratio_score', 50),
+                        'turnover_rate_score': volume_result.get('turnover_rate_score', 50),
+                        'volume_trend_score': volume_result.get('volume_trend_score', 50),
+                        'price_trend_score': price_result.get('price_trend_score', 50),
+                        'price_position_score': price_result.get('price_position_score', 50),
+                        'volatility_score': price_result.get('volatility_score', 50),
                     }
                     
                     results.append(result)
