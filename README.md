@@ -114,12 +114,13 @@ ts.set_token('your_token_here')
 
 #### 验证配置
 
-运行测试脚本验证Token配置：
+运行程序测试Token配置是否正确：
 ```bash
-python test_token.py
+# 尝试运行程序，如果Token配置正确会开始数据获取
+python stock_selector.py --top-n 5 --board main
 ```
 
-如果看到 "✅ Token配置验证通过！" 表示配置成功。
+如果程序开始正常运行并显示数据获取进度，表示Token配置成功。如果提示Token相关错误，请检查配置。
 
 ### 3. 运行程序
 
@@ -244,7 +245,7 @@ TOP 10 只股票:
 程序采用**多维度加权评分**体系，总评分 = Σ(各维度得分 × 对应权重)
 
 - 各维度得分范围：0-100分
-- 所有权重总和：100%
+- 所有权重总和：1.0（或100%）
 - 最终得分范围：0-100分
 
 ### 各维度详细说明
@@ -484,7 +485,7 @@ python stock_selector.py --refresh --board main
 1. 检查是否设置了环境变量：`echo $TUSHARE_TOKEN`（Linux/Mac）或 `echo %TUSHARE_TOKEN%`（Windows CMD）
 2. 检查config.py中是否设置了TUSHARE_TOKEN
 3. 确保Token字符串正确（没有多余的空格或引号）
-4. 运行 `python test_token.py` 进行诊断
+4. 运行程序测试：`python stock_selector.py --top-n 5 --board main`，查看是否出现Token错误
 
 #### Q2: 提示"权限不足"或"积分不足"怎么办？
 
@@ -500,15 +501,15 @@ python stock_selector.py --refresh --board main
 1. 重新登录Tushare官网，复制最新的Token
 2. 确保Token字符串完整（没有截断）
 3. 确保没有多余的空格或特殊字符
-4. 重新配置Token并运行 `python test_token.py` 验证
+4. 重新配置Token并运行程序测试：`python stock_selector.py --top-n 5 --board main`
 
 ### 其他问题
 
 #### Q: 数据获取失败怎么办？
 
-A: 
+A:
 1. 检查网络连接
-2. 检查token是否有效（运行 `python test_token.py`）
+2. 检查token是否有效（运行程序查看错误信息）
 3. 检查积分是否充足
 4. 尝试使用 `--refresh` 参数强制刷新
 5. 查看错误信息，根据提示解决问题
@@ -540,7 +541,7 @@ A:
 
 A: 总评分 = Σ(各维度得分 × 对应权重)
 - 各维度得分范围：0-100分
-- 所有权重总和：100%
+- 所有权重总和：1.0（或100%）
 - 最终得分范围：0-100分
 
 ## 注意事项
@@ -562,84 +563,11 @@ A: 总评分 = Σ(各维度得分 × 对应权重)
 - [ ] 已在Tushare官网注册账号
 - [ ] 已获取Token
 - [ ] 已通过环境变量或配置文件设置Token
-- [ ] 已运行 `python test_token.py` 验证Token有效
+- [ ] 已运行 `python stock_selector.py --top-n 5 --board main` 验证Token有效
 - [ ] 已检查积分是否充足
 - [ ] 已确认网络连接正常
 
 完成以上步骤后，您就可以正常使用股票选股程序了！
-
-## Git 中文提交信息乱码问题解决方案
-
-### 问题说明
-
-在Windows PowerShell中使用Git提交中文信息时，可能会出现乱码问题。这是因为PowerShell和Git的默认编码设置导致的。
-
-### 解决方案
-
-执行以下命令进行配置：
-
-```powershell
-# 设置Git全局配置
-git config --global core.quotepath false
-git config --global i18n.commitencoding utf-8
-git config --global i18n.logoutputencoding utf-8
-git config --global core.autocrlf false
-
-# 设置PowerShell编码（每次打开PowerShell时执行）
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$PSDefaultParameterValues['*:Encoding'] = 'utf8'
-chcp 65001
-```
-
-### 验证配置
-
-运行以下命令验证配置是否生效：
-
-```powershell
-git config --global --list | Select-String -Pattern "encoding|utf|i18n"
-```
-
-应该看到：
-- `i18n.commitencoding=utf-8`
-- `i18n.logoutputencoding=utf-8`
-
-### 提交信息最佳实践
-
-1. **使用UTF-8编码**：确保提交信息使用UTF-8编码
-2. **使用文件方式提交**：如果直接在命令行输入中文有问题，可以使用文件方式：
-   ```powershell
-   # 创建提交信息文件
-   "优化代码结构和功能改进" | Out-File -Encoding utf8 commit_msg.txt
-   
-   # 使用文件提交
-   git commit -F commit_msg.txt
-   ```
-3. **使用提交模板**（可选）：可以配置提交模板，使用 `git commit` 时会自动打开模板
-
-### 永久解决方案
-
-将以下内容添加到PowerShell配置文件（`$PROFILE`）中：
-
-```powershell
-# Git UTF-8编码设置
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$PSDefaultParameterValues['*:Encoding'] = 'utf8'
-chcp 65001 | Out-Null
-```
-
-查看配置文件路径：
-```powershell
-$PROFILE
-```
-
-如果文件不存在，创建它：
-```powershell
-New-Item -Path $PROFILE -Type File -Force
-```
-
-然后使用文本编辑器添加上述内容。
-
-**注意**：如果PowerShell显示仍有乱码，这是**显示问题**，实际提交到GitHub的内容是正确的。可以在GitHub网页上查看提交信息，确认是否正确显示。
 
 ## 许可证
 
