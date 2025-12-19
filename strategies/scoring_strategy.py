@@ -92,7 +92,11 @@ class ScoringStrategy(BaseStrategy):
             # 6. 获取当前价格信息
             current_price = kline_data['close'].iloc[-1] if not kline_data.empty else 0
             current_volume = kline_data['volume'].iloc[-1] if not kline_data.empty else 0
-            
+            current_pct_change = kline_data['pct_change'].iloc[-1] if not kline_data.empty and 'pct_change' in kline_data.columns else 0
+
+            # 获取数据时间（使用最新的K线数据日期）
+            data_fetch_time = kline_data['date'].iloc[-1] if not kline_data.empty and 'date' in kline_data.columns else datetime.now()
+
             result = {
                 'code': stock_code,
                 'name': stock_name,
@@ -103,6 +107,8 @@ class ScoringStrategy(BaseStrategy):
                 'price_score': round(price_score, 2),
                 'current_price': round(current_price, 2),
                 'current_volume': current_volume,
+                'pct_change': round(current_pct_change, 2),
+                'data_fetch_time': data_fetch_time,
                 # 基本面详细指标
                 'pe_ratio': fundamental_result.get('pe_ratio'),
                 'pb_ratio': fundamental_result.get('pb_ratio'),

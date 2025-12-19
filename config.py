@@ -43,7 +43,7 @@ SCORE_MIN = 0
 SCORE_MAX = 100
 
 # 选股数量
-TOP_N = 20
+TOP_N = 10
 
 # 数据获取参数
 LOOKBACK_DAYS = 60  # 回看天数

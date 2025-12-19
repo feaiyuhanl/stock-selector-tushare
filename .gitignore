@@ -20,11 +20,8 @@ wheels/
 .installed.cfg
 *.egg
 
-# 缓存目录（排除Excel文件，但保留SQLite数据库）
-cache/*.xlsx
-cache/*.xls
-# 保留SQLite数据库文件
-!cache/stock_cache.db
+# 缓存目录（整个目录都排除）
+cache/
 
 # IDE
 .vscode/

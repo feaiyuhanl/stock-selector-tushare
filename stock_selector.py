@@ -97,6 +97,122 @@ class StockSelector:
         self.strategy.data_fetcher.cache_manager.clear_cache(cache_type)
 
 
+def _print_cache_info(stock_code: str):
+    """
+    显示指定股票的缓存数据详情
+    Args:
+        stock_code: 股票代码
+    """
+    try:
+        import tushare as ts
+        from data.cache_manager import CacheManager
+        from data.fetcher import DataFetcher
+
+        # 验证Token
+        if not _check_tushare_token():
+            return
+
+        # 创建数据获取器
+        data_fetcher = DataFetcher()
+
+        print("\n" + "=" * 60)
+        print(f"【股票缓存数据详情】 - {stock_code}")
+        print("=" * 60)
+
+        # 1. 基本面数据缓存信息
+        print("\n【基本面数据缓存】")
+        fundamental_data = data_fetcher.cache_manager.get_fundamental(stock_code, force_refresh=False)
+        if fundamental_data:
+            update_time = fundamental_data.get('update_time', '未知')
+            if isinstance(update_time, str):
+                try:
+                    update_time = datetime.strptime(update_time, '%Y-%m-%d %H:%M:%S')
+                except:
+                    pass
+            print(f"  缓存状态: ✓ 存在")
+            print(f"  更新时间: {update_time}")
+            print(f"  PE市盈率: {fundamental_data.get('pe_ratio', '无')}")
+            print(f"  PB市净率: {fundamental_data.get('pb_ratio', '无')}")
+            print(f"  ROE净资产收益率: {fundamental_data.get('roe', '无')}%")
+            print(f"  营收增长率: {fundamental_data.get('revenue_growth', '无')}%")
+            print(f"  利润增长率: {fundamental_data.get('profit_growth', '无')}%")
+        else:
+            print("  缓存状态: ✗ 不存在")
+
+        # 2. 财务数据缓存信息
+        print("\n【财务数据缓存】")
+        financial_data = data_fetcher.cache_manager.get_financial(stock_code, force_refresh=False)
+        if financial_data:
+            update_time = financial_data.get('update_time', '未知')
+            if isinstance(update_time, str):
+                try:
+                    update_time = datetime.strptime(update_time, '%Y-%m-%d %H:%M:%S')
+                except:
+                    pass
+            print(f"  缓存状态: ✓ 存在")
+            print(f"  更新时间: {update_time}")
+            print(f"  ROE净资产收益率: {financial_data.get('roe', '无')}%")
+        else:
+            print("  缓存状态: ✗ 不存在")
+
+        # 3. 板块数据缓存信息
+        print("\n【板块数据缓存】")
+        sectors_data = data_fetcher.cache_manager.get_stock_sectors(stock_code, force_refresh=False)
+        if sectors_data:
+            print(f"  缓存状态: ✓ 存在")
+            print(f"  板块数量: {len(sectors_data)}")
+            print(f"  板块列表: {', '.join(sectors_data[:5])}" + ("..." if len(sectors_data) > 5 else ""))
+        else:
+            print("  缓存状态: ✗ 不存在")
+
+        # 4. 概念数据缓存信息
+        print("\n【概念数据缓存】")
+        concepts_data = data_fetcher.cache_manager.get_stock_concepts(stock_code, force_refresh=False)
+        if concepts_data:
+            print(f"  缓存状态: ✓ 存在")
+            print(f"  概念数量: {len(concepts_data)}")
+            print(f"  概念列表: {', '.join(concepts_data[:5])}" + ("..." if len(concepts_data) > 5 else ""))
+        else:
+            print("  缓存状态: ✗ 不存在")
+
+        # 5. K线数据缓存信息
+        print("\n【K线数据缓存】")
+        kline_data = data_fetcher.cache_manager.get_kline(stock_code, 'stock', 'daily', force_refresh=False)
+        if kline_data is not None and not kline_data.empty:
+            print(f"  缓存状态: ✓ 存在")
+            print(f"  数据条数: {len(kline_data)}")
+            print(f"  时间范围: {kline_data['date'].min()} ~ {kline_data['date'].max()}")
+            if not kline_data.empty:
+                latest_data = kline_data.iloc[-1]
+                print(f"  最新收盘价: {latest_data.get('close', '无')}元")
+                print(f"  最新涨跌幅: {latest_data.get('pct_change', '无')}%")
+        else:
+            print("  缓存状态: ✗ 不存在")
+
+        # 6. 缓存有效性检查
+        print("\n【缓存有效性检查】")
+        current_time = datetime.now()
+
+        # 检查基本面缓存有效性
+        fundamental_valid = data_fetcher.cache_manager._is_cache_valid('fundamental', stock_code)
+        print(f"  基本面数据: {'✓ 有效' if fundamental_valid else '✗ 失效'}")
+
+        # 检查财务缓存有效性
+        financial_valid = data_fetcher.cache_manager._is_cache_valid('financial', stock_code)
+        print(f"  财务数据: {'✓ 有效' if financial_valid else '✗ 失效'}")
+
+        # 检查K线缓存有效性
+        kline_valid = data_fetcher.cache_manager.has_latest_trading_day_data(stock_code, 'stock', 'daily')
+        print(f"  K线数据: {'✓ 有效' if kline_valid else '✗ 失效'}")
+
+        print("\n" + "=" * 60)
+
+    except Exception as e:
+        print(f"\n[错误] 获取缓存信息失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def _check_tushare_token():
     """
     检查Tushare Token配置（前置检查）
@@ -270,8 +386,28 @@ def _print_top5_details(results: pd.DataFrame, selector: StockSelector):
         code = stock.get('code', 'N/A')
         name = stock.get('name', 'N/A')
 
-        print(f"\n【第{idx}名】{code} {name}")
-        print("-" * 40)
+        # 获取数据获取时间、收盘价、涨跌幅
+        current_price = stock.get('current_price')
+        pct_change = stock.get('pct_change')
+        data_fetch_time = stock.get('data_fetch_time')
+
+        # 构建股票信息字符串
+        stock_info = f"【第{idx}名】{code} {name}"
+
+        # 添加价格信息
+        if current_price is not None:
+            stock_info += f" | 收盘价: {current_price:.2f}元"
+        if pct_change is not None:
+            stock_info += f" | 涨跌幅: {pct_change:+.2f}%"
+        if data_fetch_time is not None:
+            # 如果是datetime对象，格式化显示
+            if hasattr(data_fetch_time, 'strftime'):
+                stock_info += f" | 数据时间: {data_fetch_time.strftime('%Y-%m-%d %H:%M')}"
+            else:
+                stock_info += f" | 数据时间: {data_fetch_time}"
+
+        print(f"\n{stock_info}")
+        print("-" * 60)
 
         # 基本面评分详情
         _print_fundamental_details(stock)
@@ -693,7 +829,8 @@ def _print_results(results: pd.DataFrame, selector: StockSelector):
 
     # 显示TOP股票
     print("\n" + "═" * 60)
-    print(f"【TOP {len(results)} 只股票】")
+    ranking_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"【TOP {len(results)} 只股票】 - 排名时间: {ranking_time}")
     print("═" * 60)
 
     # 设置pandas显示选项
@@ -724,13 +861,19 @@ def main():
     parser.add_argument('--strategy', type=str, default='scoring', help='选股策略 (scoring)')
     parser.add_argument('--top-n', type=int, default=config.TOP_N, help='返回前N只股票')
     parser.add_argument('--stocks', type=str, nargs='+', help='指定股票代码列表')
+    parser.add_argument('--cache-info', type=str, help='查看指定股票的缓存数据详情')
     parser.add_argument('--board', type=str, nargs='+', 
                        choices=['main', 'sme', 'gem', 'star', 'bse', 'b'],
                        default=config.DEFAULT_BOARD_TYPES,
                        help='板块类型：main(主板), sme(中小板), gem(创业板), star(科创板), bse(北交所), b(B股)')
     parser.add_argument('--workers', type=int, default=config.DEFAULT_MAX_WORKERS, help='线程数')
     args = parser.parse_args()
-    
+
+    # 处理缓存信息查询
+    if args.cache_info:
+        _print_cache_info(args.cache_info)
+        return
+
     # 前置检查：验证Tushare Token配置
     if not _check_tushare_token():
         sys.exit(1)
