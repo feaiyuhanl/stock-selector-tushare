@@ -70,3 +70,16 @@ DEFAULT_MAX_WORKERS = 10  # 默认线程数
 # Tushare配置
 TUSHARE_TOKEN = None  # 需要在环境变量或配置文件中设置，或通过代码设置
 
+# 邮件通知配置
+EMAIL_CONFIG = {
+    'enabled': False,  # 是否启用邮件通知
+    'default_recipients': ['posterhan@126.com'],  # 默认收件人列表
+    'tencent_cloud': {
+        'secret_id': None,   # 腾讯云SecretId
+        'secret_key': None,  # 腾讯云SecretKey
+        'region': 'ap-guangzhou',  # 地域
+        'from_email': None,  # 发件人邮箱
+        'from_name': 'A股选股程序',  # 发件人名称
+    }
+}
+

@@ -12,6 +12,7 @@ from strategies.base_strategy import BaseStrategy
 import config
 import os
 import sys
+from email_notification import EmailNotifier
 
 
 class StockSelector:
@@ -867,6 +868,8 @@ def main():
                        default=config.DEFAULT_BOARD_TYPES,
                        help='板块类型：main(主板), sme(中小板), gem(创业板), star(科创板), bse(北交所), b(B股)')
     parser.add_argument('--workers', type=int, default=config.DEFAULT_MAX_WORKERS, help='线程数')
+    parser.add_argument('--email-notify', action='store_true', help='启用邮件通知')
+    parser.add_argument('--email-to', type=str, nargs='+', help='指定邮件收件人地址（多个地址用空格分隔）')
     args = parser.parse_args()
 
     # 处理缓存信息查询
@@ -922,6 +925,45 @@ def main():
     
     # 打印结果
     _print_results(results, selector)
+
+    # 发送邮件通知
+    if args.email_notify:
+        try:
+            email_notifier = EmailNotifier()
+            recipients = args.email_to if args.email_to else config.EMAIL_CONFIG['default_recipients']
+
+            # 构建邮件内容
+            subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            body = f"""
+A股选股程序执行完成！
+
+执行参数：
+- 策略: {args.strategy}
+- TOP-N: {args.top_n}
+- 板块: {', '.join(args.board)}
+- 强制刷新: {'是' if args.refresh else '否'}
+
+选股结果：
+{f"共找到 {len(results)} 只股票" if results else "未找到符合条件的股票"}
+
+"""
+
+            if results:
+                # 添加TOP股票信息
+                body += "\nTOP股票列表：\n"
+                for i, stock in enumerate(results[:min(10, len(results))], 1):  # 只显示前10只
+                    body += f"{i}. {stock['code']} {stock['name']} - 评分: {stock['total_score']:.2f}\n"
+
+            # 发送邮件
+            success = email_notifier.send_notification(subject, body, recipients)
+            if success:
+                print(f"\n[邮件通知] 已发送通知到: {', '.join(recipients)}")
+            else:
+                print("\n[邮件通知] 发送失败，请检查邮件配置")
+
+        except Exception as e:
+            print(f"\n[邮件通知] 发送出错: {e}")
+            print("[提示] 请检查邮件配置或网络连接")
 
 
 if __name__ == '__main__':

@@ -16,6 +16,7 @@
 - **缓存控制**：支持强制刷新缓存，确保数据最新
 - **稳定数据源**：基于tushare，提供稳定的数据源，避免限流问题
 - **智能容错**：自动处理缺失指标，根据数据可用性动态调整权重
+- **邮件通知**：支持腾讯云邮件推送，程序执行完成后自动发送结果通知
 
 ## 项目结构
 
@@ -122,6 +123,53 @@ python stock_selector.py --top-n 5 --board main
 
 如果程序开始正常运行并显示数据获取进度，表示Token配置成功。如果提示Token相关错误，请检查配置。
 
+#### 配置腾讯云邮件推送（可选，用于邮件通知）
+
+程序支持通过腾讯云邮件推送服务发送执行结果通知。
+
+**1. 申请腾讯云账号并开通SES服务**
+
+1. 访问 [腾讯云官网](https://cloud.tencent.com/) 注册账号
+2. 开通 [腾讯云邮件推送服务](https://console.cloud.tencent.com/ses)
+3. 完成实名认证和域名验证
+
+**2. 获取API密钥**
+
+1. 进入 [API密钥管理](https://console.cloud.tencent.com/cam/capi)
+2. 创建新的密钥对，记录SecretId和SecretKey
+
+**3. 配置发件人邮箱**
+
+1. 在腾讯云SES控制台添加发件人邮箱
+2. 完成邮箱验证（腾讯云会发送验证邮件）
+
+**4. 配置邮件参数**
+
+编辑 `config.py` 文件，填写邮件配置：
+
+```python
+EMAIL_CONFIG = {
+    'enabled': False,  # 运行时通过--email-notify参数启用
+    'default_recipients': ['posterhan@126.com'],  # 默认收件人
+    'tencent_cloud': {
+        'secret_id': 'AKIDxxxxxxxxxxxxxxxxxx',        # 您的腾讯云SecretId
+        'secret_key': 'xxxxxxxxxxxxxxxxxxxxxxxxxx', # 您的腾讯云SecretKey
+        'region': 'ap-guangzhou',                   # 地域
+        'from_email': 'noreply@yourdomain.com',     # 已验证的发件人邮箱
+        'from_name': 'A股选股程序',                 # 发件人名称
+    }
+}
+```
+
+**5. 测试邮件配置**
+
+```bash
+# 运行邮件配置测试
+python email_notification.py
+```
+
+如果测试成功，会收到测试邮件。
+
 ### 3. 运行程序
 
 ```bash
@@ -153,6 +201,8 @@ python stock_selector.py --help
 - `--stocks`: 指定股票代码列表（如：`--stocks 000001 000002`）
 - `--board`: 板块类型（main/sme/gem/star/bse/b），可多选（如：`--board main gem`）
 - `--workers`: 线程数（默认10）
+- `--email-notify`: 启用邮件通知功能
+- `--email-to`: 指定邮件收件人地址（多个地址用空格分隔，默认发送给posterhan@126.com）
 
 ### 使用示例
 
@@ -168,6 +218,12 @@ python stock_selector.py --board main gem --top-n 30
 
 # 强制刷新缓存
 python stock_selector.py --refresh --board main
+
+# 启用邮件通知
+python stock_selector.py --board main --top-n 10 --email-notify
+
+# 指定多个收件人
+python stock_selector.py --board main --top-n 10 --email-notify --email-to user1@example.com user2@example.com
 ```
 
 ### 程序输出说明
@@ -468,6 +524,19 @@ PRICE_WEIGHTS = {
 ```python
 # 默认板块筛选（只选主板）
 DEFAULT_BOARD_TYPES = ['main']  # 可以修改为 ['main', 'gem'] 等
+
+# 邮件通知配置
+EMAIL_CONFIG = {
+    'enabled': False,  # 是否启用邮件通知（通过命令行参数--email-notify控制）
+    'default_recipients': ['posterhan@126.com'],  # 默认收件人列表
+    'tencent_cloud': {
+        'secret_id': 'your_secret_id',     # 腾讯云SecretId，从腾讯云控制台获取
+        'secret_key': 'your_secret_key',   # 腾讯云SecretKey，从腾讯云控制台获取
+        'region': 'ap-guangzhou',          # 地域，通常使用广州
+        'from_email': 'your_verified_email@domain.com',  # 已验证的发件人邮箱
+        'from_name': 'A股选股程序',        # 发件人名称
+    }
+}
 ```
 
 ## 本地缓存机制
@@ -691,10 +760,36 @@ A: 如果所有股票都缺失该维度的数据，程序会自动将该维度�
 
 #### Q: 如何确保所有维度数据都可用？
 
-A: 
+A:
 1. 确保Tushare Token积分≥2000（免费用户无法获取财务数据）
 2. 使用 `--refresh` 参数强制刷新缓存
 3. 在网络良好的环境下运行
+
+### 邮件通知相关问题
+
+#### Q: 邮件通知功能如何使用？
+
+A:
+1. 配置腾讯云邮件推送服务（SecretId、SecretKey、发件人邮箱）
+2. 使用 `--email-notify` 参数启用邮件通知
+3. 可选使用 `--email-to` 指定收件人，默认发送给posterhan@126.com
+4. 程序执行完成后会自动发送结果邮件
+
+#### Q: 邮件发送失败怎么办？
+
+A:
+1. 检查腾讯云配置是否正确（SecretId、SecretKey、发件人邮箱）
+2. 确认发件人邮箱已在腾讯云SES中验证
+3. 检查网络连接和腾讯云账户余额
+4. 运行 `python email_notification.py` 测试邮件配置
+5. 查看控制台错误信息，确认具体的失败原因
+
+#### Q: 如何配置多个收件人？
+
+A: 使用 `--email-to` 参数指定多个收件人：
+```bash
+python stock_selector.py --email-notify --email-to user1@domain.com user2@domain.com user3@domain.com
+```
 
 #### Q: 评分公式是什么？
 
