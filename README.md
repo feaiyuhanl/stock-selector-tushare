@@ -143,7 +143,27 @@ python stock_selector.py --top-n 5 --board main
 1. 在腾讯云SES控制台添加发件人邮箱
 2. 完成邮箱验证（腾讯云会发送验证邮件）
 
-**4. 配置邮件参数**
+**4. 配置腾讯云密钥**
+
+有两种配置方式，推荐使用环境变量方式（更安全）：
+
+**方式一：环境变量配置（推荐）**
+
+```bash
+# Windows PowerShell
+$env:TENCENT_SECRET_ID="AKIDxxxxxxxxxxxxxxxxxx"
+$env:TENCENT_SECRET_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Windows CMD
+set TENCENT_SECRET_ID=AKIDxxxxxxxxxxxxxxxxxx
+set TENCENT_SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Linux/Mac
+export TENCENT_SECRET_ID="AKIDxxxxxxxxxxxxxxxxxx"
+export TENCENT_SECRET_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+**方式二：配置文件配置**
 
 编辑 `config.py` 文件，填写邮件配置：
 
@@ -160,6 +180,8 @@ EMAIL_CONFIG = {
     }
 }
 ```
+
+> **注意**: 环境变量配置优先于配置文件配置。如果同时设置了环境变量和配置文件，程序会使用环境变量的值。
 
 **5. 测试邮件配置**
 
@@ -530,8 +552,8 @@ EMAIL_CONFIG = {
     'enabled': False,  # 是否启用邮件通知（通过命令行参数--email-notify控制）
     'default_recipients': ['posterhan@126.com'],  # 默认收件人列表
     'tencent_cloud': {
-        'secret_id': 'your_secret_id',     # 腾讯云SecretId，从腾讯云控制台获取
-        'secret_key': 'your_secret_key',   # 腾讯云SecretKey，从腾讯云控制台获取
+        'secret_id': 'your_secret_id',     # 腾讯云SecretId，可从环境变量TENCENT_SECRET_ID获取
+        'secret_key': 'your_secret_key',   # 腾讯云SecretKey，可从环境变量TENCENT_SECRET_KEY获取
         'region': 'ap-guangzhou',          # 地域，通常使用广州
         'from_email': 'your_verified_email@domain.com',  # 已验证的发件人邮箱
         'from_name': 'A股选股程序',        # 发件人名称
@@ -779,6 +801,8 @@ A:
 
 A:
 1. 检查腾讯云配置是否正确（SecretId、SecretKey、发件人邮箱）
+   - 优先检查环境变量：`TENCENT_SECRET_ID` 和 `TENCENT_SECRET_KEY`
+   - 如果未设置环境变量，检查config.py中的配置
 2. 确认发件人邮箱已在腾讯云SES中验证
 3. 检查网络连接和腾讯云账户余额
 4. 运行 `python email_notification.py` 测试邮件配置

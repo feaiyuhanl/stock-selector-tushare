@@ -3,8 +3,13 @@
 """
 
 import json
+import os
+import sys
 from datetime import datetime
 from typing import List, Optional
+
+# 添加上级目录到路径，以便导入config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 
@@ -14,11 +19,17 @@ class EmailNotifier:
     def __init__(self):
         """初始化邮件通知器"""
         self.config = config.EMAIL_CONFIG
-        self.tencent_config = self.config['tencent_cloud']
+
+        # 从环境变量获取腾讯云密钥，优先级高于配置文件
+        tencent_config = self.config['tencent_cloud'].copy()
+        tencent_config['secret_id'] = os.environ.get('TENCENT_SECRET_ID') or tencent_config.get('secret_id')
+        tencent_config['secret_key'] = os.environ.get('TENCENT_SECRET_KEY') or tencent_config.get('secret_key')
+        self.tencent_config = tencent_config
 
         # 检查腾讯云配置
         if not self._check_tencent_config():
-            print("[邮件通知] 腾讯云配置不完整，请检查config.py中的EMAIL_CONFIG")
+            print("[邮件通知] 腾讯云配置不完整，请检查环境变量或config.py中的EMAIL_CONFIG")
+            print("[邮件通知] 环境变量: TENCENT_SECRET_ID, TENCENT_SECRET_KEY")
             self.available = False
         else:
             self.available = True
@@ -194,6 +205,26 @@ def test_email_config():
         return False
 
 
+def test_env_variables():
+    """测试环境变量获取功能"""
+    print("=== 环境变量测试 ===")
+
+    import os
+    print(f"TENCENT_SECRET_ID: {os.environ.get('TENCENT_SECRET_ID', '未设置')}")
+    print(f"TENCENT_SECRET_KEY: {os.environ.get('TENCENT_SECRET_KEY', '未设置')}")
+
+    # 测试配置合并
+    notifier = EmailNotifier()
+    if hasattr(notifier, 'tencent_config'):
+        print(f"配置中的secret_id: {notifier.tencent_config.get('secret_id', '未设置')}")
+        print(f"配置中的secret_key: {notifier.tencent_config.get('secret_key', '未设置')}")
+
+
 if __name__ == '__main__':
-    # 测试邮件功能
-    test_email_config()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-env':
+        # 测试环境变量功能
+        test_env_variables()
+    else:
+        # 测试邮件功能
+        test_email_config()

@@ -73,13 +73,24 @@ TUSHARE_TOKEN = None  # 需要在环境变量或配置文件中设置，或通�
 # 邮件通知配置
 EMAIL_CONFIG = {
     'enabled': False,  # 是否启用邮件通知
-    'default_recipients': ['posterhan@126.com'],  # 默认收件人列表
+    'default_recipients': [''],  # 默认收件人列表
     'tencent_cloud': {
-        'secret_id': None,   # 腾讯云SecretId
-        'secret_key': None,  # 腾讯云SecretKey
+        'secret_id': None,   # 腾讯云SecretId（可从环境变量TENCENT_SECRET_ID获取）
+        'secret_key': None,  # 腾讯云SecretKey（可从环境变量TENCENT_SECRET_KEY获取）
         'region': 'ap-guangzhou',  # 地域
-        'from_email': None,  # 发件人邮箱
+        'from_email': '',  # 发件人邮箱
         'from_name': 'A股选股程序',  # 发件人名称
     }
+}
+
+# 企业微信通知配置
+WECHAT_CONFIG = {
+    'enabled': False,  # 是否启用企业微信通知
+    'webhook_url': None,  # 企业微信机器人Webhook URL（可从环境变量WECHAT_WEBHOOK_URL获取）
+    # 如何获取Webhook URL:
+    # 1. 打开企业微信 -> 应用与小程序
+    # 2. 点击右上角"+" -> 机器人
+    # 3. 添加机器人并设置Webhook URL
+    # 4. 复制Webhook URL配置到环境变量或此处
 }
 
