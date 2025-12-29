@@ -27,6 +27,13 @@ class EmailNotifier(BaseNotifier):
         tencent_config['secret_id'] = os.environ.get('TENCENT_SECRET_ID') or tencent_config.get('secret_id')
         tencent_config['secret_key'] = os.environ.get('TENCENT_SECRET_KEY') or tencent_config.get('secret_key')
         self.tencent_config = tencent_config
+        
+        # 调试信息：检查配置是否获取成功（不显示完整密钥）
+        if tencent_config.get('secret_id'):
+            secret_id_preview = tencent_config['secret_id'][:8] + "..." if len(tencent_config['secret_id']) > 8 else tencent_config['secret_id']
+            print(f"[邮件通知] SecretId已配置: {secret_id_preview}")
+        else:
+            print("[邮件通知] SecretId未配置")
 
         # 检查腾讯云配置
         if not self._check_tencent_config():
@@ -41,9 +48,17 @@ class EmailNotifier(BaseNotifier):
                 from tencentcloud.ses.v20201002 import ses_client, models
 
                 # 创建腾讯云客户端
+                # 确保 SecretId 和 SecretKey 不为空
+                secret_id = self.tencent_config['secret_id'].strip() if isinstance(self.tencent_config['secret_id'], str) else self.tencent_config['secret_id']
+                secret_key = self.tencent_config['secret_key'].strip() if isinstance(self.tencent_config['secret_key'], str) else self.tencent_config['secret_key']
+                
+                if not secret_id or not secret_key:
+                    print("[邮件通知] SecretId 或 SecretKey 为空，请检查配置")
+                    return
+                
                 cred = credential.Credential(
-                    self.tencent_config['secret_id'],
-                    self.tencent_config['secret_key']
+                    secret_id,
+                    secret_key
                 )
 
                 http_profile = HttpProfile()
@@ -65,7 +80,8 @@ class EmailNotifier(BaseNotifier):
         """检查腾讯云配置是否完整"""
         required_fields = ['secret_id', 'secret_key', 'from_email']
         for field in required_fields:
-            if not self.tencent_config.get(field):
+            value = self.tencent_config.get(field)
+            if not value or (isinstance(value, str) and value.strip() == ''):
                 print(f"[邮件通知] 缺少腾讯云配置: {field}")
                 return False
         return True
@@ -120,7 +136,17 @@ class EmailNotifier(BaseNotifier):
                 return False
 
         except Exception as e:
-            print(f"[邮件通知] 发送邮件失败: {e}")
+            error_msg = str(e)
+            print(f"[邮件通知] 发送邮件失败: {error_msg}")
+            
+            # 提供更详细的错误提示
+            if "SecretId" in error_msg or "AuthFailure" in error_msg:
+                print("[邮件通知] 认证失败，请检查：")
+                print("[邮件通知] 1. SecretId 和 SecretKey 是否正确配置")
+                print("[邮件通知] 2. 环境变量 TENCENT_SECRET_ID 和 TENCENT_SECRET_KEY 是否设置")
+                print("[邮件通知] 3. SecretId 和 SecretKey 是否在腾讯云控制台正确创建")
+                print("[邮件通知] 4. 是否在腾讯云控制台开通了SES邮件推送服务")
+                print("[邮件通知] 5. SecretId 是否有SES服务的访问权限")
             return False
 
     def _format_html_body(self, text_body: str) -> str:
