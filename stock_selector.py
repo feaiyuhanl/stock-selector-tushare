@@ -955,137 +955,137 @@ A股选股程序执行完成！
 """
 
                 if not results.empty:
-                # 数据可用性统计
-                data_availability = _calculate_data_availability(results)
-                body += "\n" + "=" * 60 + "\n"
-                body += "【数据可用性】\n"
-                body += "=" * 60 + "\n"
-                for dimension, stats in data_availability.items():
-                    if stats['total'] > 0:
-                        percentage = (stats['available'] / stats['total']) * 100
-                        body += f"  {dimension}: {stats['available']}/{stats['total']} ({percentage:.1f}%)\n"
-
-                # 显示维度信息
-                used_dimensions, actual_weights, dimension_names, dimension_details = _print_dimension_info(selector)
-                body += "\n" + "=" * 60 + "\n"
-                body += "【评分维度说明】\n"
-                body += "=" * 60 + "\n"
-                body += f"使用维度: {', '.join(dimension_names)}\n"
-                for detail in dimension_details:
-                    body += f"{detail}\n"
-
-                # TOP股票表格
-                body += "\n" + "=" * 60 + "\n"
-                ranking_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                body += f"【TOP {len(results)} 只股票】 - 排名时间: {ranking_time}\n"
-                body += "=" * 60 + "\n\n"
-
-                # 选择要显示的列
-                display_cols = ['code', 'name', 'score', 'fundamental_score', 'volume_score', 'price_score']
-                available_cols = [col for col in display_cols if col in results.columns]
-
-                # 将DataFrame转换为字符串格式用于邮件
-                table_str = results[available_cols].to_string(index=False)
-                body += table_str + "\n"
-                body += "=" * 60 + "\n"
-
-                # TOP5股票详细指标（邮件中只显示前3只，避免邮件过长）
-                if len(results) > 0:
-                    top5 = results.head(min(3, len(results)))  # 邮件中只显示前3只
+                    # 数据可用性统计
+                    data_availability = _calculate_data_availability(results)
                     body += "\n" + "=" * 60 + "\n"
-                    body += "【TOP股票详细指标】\n"
+                    body += "【数据可用性】\n"
+                    body += "=" * 60 + "\n"
+                    for dimension, stats in data_availability.items():
+                        if stats['total'] > 0:
+                            percentage = (stats['available'] / stats['total']) * 100
+                            body += f"  {dimension}: {stats['available']}/{stats['total']} ({percentage:.1f}%)\n"
+
+                    # 显示维度信息
+                    used_dimensions, actual_weights, dimension_names, dimension_details = _print_dimension_info(selector)
+                    body += "\n" + "=" * 60 + "\n"
+                    body += "【评分维度说明】\n"
+                    body += "=" * 60 + "\n"
+                    body += f"使用维度: {', '.join(dimension_names)}\n"
+                    for detail in dimension_details:
+                        body += f"{detail}\n"
+
+                    # TOP股票表格
+                    body += "\n" + "=" * 60 + "\n"
+                    ranking_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    body += f"【TOP {len(results)} 只股票】 - 排名时间: {ranking_time}\n"
+                    body += "=" * 60 + "\n\n"
+
+                    # 选择要显示的列
+                    display_cols = ['code', 'name', 'score', 'fundamental_score', 'volume_score', 'price_score']
+                    available_cols = [col for col in display_cols if col in results.columns]
+
+                    # 将DataFrame转换为字符串格式用于邮件
+                    table_str = results[available_cols].to_string(index=False)
+                    body += table_str + "\n"
                     body += "=" * 60 + "\n"
 
-                    for idx, (_, stock) in enumerate(top5.iterrows(), 1):
-                        code = stock.get('code', 'N/A')
-                        name = stock.get('name', 'N/A')
+                    # TOP5股票详细指标（邮件中只显示前3只，避免邮件过长）
+                    if len(results) > 0:
+                        top5 = results.head(min(3, len(results)))  # 邮件中只显示前3只
+                        body += "\n" + "=" * 60 + "\n"
+                        body += "【TOP股票详细指标】\n"
+                        body += "=" * 60 + "\n"
 
-                        # 获取数据获取时间、收盘价、涨跌幅
-                        current_price = stock.get('current_price')
-                        pct_change = stock.get('pct_change')
-                        data_fetch_time = stock.get('data_fetch_time')
+                        for idx, (_, stock) in enumerate(top5.iterrows(), 1):
+                            code = stock.get('code', 'N/A')
+                            name = stock.get('name', 'N/A')
 
-                        # 构建股票信息字符串
-                        stock_info = f"【第{idx}名】{code} {name}"
+                            # 获取数据获取时间、收盘价、涨跌幅
+                            current_price = stock.get('current_price')
+                            pct_change = stock.get('pct_change')
+                            data_fetch_time = stock.get('data_fetch_time')
 
-                        # 添加价格信息
-                        if current_price is not None:
-                            stock_info += f" | 收盘价: {current_price:.2f}元"
-                        if pct_change is not None:
-                            stock_info += f" | 涨跌幅: {pct_change:+.2f}%"
-                        if data_fetch_time is not None:
-                            if hasattr(data_fetch_time, 'strftime'):
-                                stock_info += f" | 数据时间: {data_fetch_time.strftime('%Y-%m-%d %H:%M')}"
-                            else:
-                                stock_info += f" | 数据时间: {data_fetch_time}"
+                            # 构建股票信息字符串
+                            stock_info = f"【第{idx}名】{code} {name}"
 
-                        body += f"\n{stock_info}\n"
-                        body += "-" * 60 + "\n"
+                            # 添加价格信息
+                            if current_price is not None:
+                                stock_info += f" | 收盘价: {current_price:.2f}元"
+                            if pct_change is not None:
+                                stock_info += f" | 涨跌幅: {pct_change:+.2f}%"
+                            if data_fetch_time is not None:
+                                if hasattr(data_fetch_time, 'strftime'):
+                                    stock_info += f" | 数据时间: {data_fetch_time.strftime('%Y-%m-%d %H:%M')}"
+                                else:
+                                    stock_info += f" | 数据时间: {data_fetch_time}"
 
-                        # 基本面评分详情
-                        body += "【基本面评分详情】\n"
-                        pe_ratio = stock.get('pe_ratio')
-                        pb_ratio = stock.get('pb_ratio')
-                        roe = stock.get('roe')
-                        revenue_growth = stock.get('revenue_growth')
-                        profit_growth = stock.get('profit_growth')
+                            body += f"\n{stock_info}\n"
+                            body += "-" * 60 + "\n"
 
-                        fundamental_weights = config.FUNDAMENTAL_WEIGHTS
-                        if pe_ratio is not None and pe_ratio > 0:
-                            body += f"  市盈率(PE): {pe_ratio:.2f} | 权重: {fundamental_weights['pe_ratio']:.0%}\n"
-                        if pb_ratio is not None and pb_ratio > 0:
-                            body += f"  市净率(PB): {pb_ratio:.2f} | 权重: {fundamental_weights['pb_ratio']:.0%}\n"
-                        if roe is not None:
-                            body += f"  净资产收益率(ROE): {roe:.2f}% | 权重: {fundamental_weights['roe']:.0%}\n"
-                        if revenue_growth is not None:
-                            body += f"  营收增长率: {revenue_growth:.2f}% | 权重: {fundamental_weights['revenue_growth']:.0%}\n"
-                        if profit_growth is not None:
-                            body += f"  利润增长率: {profit_growth:.2f}% | 权重: {fundamental_weights['profit_growth']:.0%}\n"
+                            # 基本面评分详情
+                            body += "【基本面评分详情】\n"
+                            pe_ratio = stock.get('pe_ratio')
+                            pb_ratio = stock.get('pb_ratio')
+                            roe = stock.get('roe')
+                            revenue_growth = stock.get('revenue_growth')
+                            profit_growth = stock.get('profit_growth')
 
-                        # 成交量评分详情
-                        body += "【成交量评分详情】\n"
-                        volume_ratio = stock.get('volume_ratio')
-                        turnover_rate = stock.get('turnover_rate')
-                        volume_trend = stock.get('volume_trend')
+                            fundamental_weights = config.FUNDAMENTAL_WEIGHTS
+                            if pe_ratio is not None and pe_ratio > 0:
+                                body += f"  市盈率(PE): {pe_ratio:.2f} | 权重: {fundamental_weights['pe_ratio']:.0%}\n"
+                            if pb_ratio is not None and pb_ratio > 0:
+                                body += f"  市净率(PB): {pb_ratio:.2f} | 权重: {fundamental_weights['pb_ratio']:.0%}\n"
+                            if roe is not None:
+                                body += f"  净资产收益率(ROE): {roe:.2f}% | 权重: {fundamental_weights['roe']:.0%}\n"
+                            if revenue_growth is not None:
+                                body += f"  营收增长率: {revenue_growth:.2f}% | 权重: {fundamental_weights['revenue_growth']:.0%}\n"
+                            if profit_growth is not None:
+                                body += f"  利润增长率: {profit_growth:.2f}% | 权重: {fundamental_weights['profit_growth']:.0%}\n"
 
-                        volume_weights = config.VOLUME_WEIGHTS
-                        if volume_ratio is not None:
-                            body += f"  量比: {volume_ratio:.2f} | 权重: {volume_weights['volume_ratio']:.0%}\n"
-                        if turnover_rate is not None:
-                            body += f"  换手率: {turnover_rate:.2f}% | 权重: {volume_weights['turnover_rate']:.0%}\n"
-                        if volume_trend is not None:
-                            body += f"  成交量趋势: {volume_trend:.2f} | 权重: {volume_weights['volume_trend']:.0%}\n"
+                            # 成交量评分详情
+                            body += "【成交量评分详情】\n"
+                            volume_ratio = stock.get('volume_ratio')
+                            turnover_rate = stock.get('turnover_rate')
+                            volume_trend = stock.get('volume_trend')
 
-                        # 价格评分详情
-                        body += "【价格评分详情】\n"
-                        price_trend = stock.get('price_trend')
-                        price_position = stock.get('price_position')
-                        volatility = stock.get('volatility')
+                            volume_weights = config.VOLUME_WEIGHTS
+                            if volume_ratio is not None:
+                                body += f"  量比: {volume_ratio:.2f} | 权重: {volume_weights['volume_ratio']:.0%}\n"
+                            if turnover_rate is not None:
+                                body += f"  换手率: {turnover_rate:.2f}% | 权重: {volume_weights['turnover_rate']:.0%}\n"
+                            if volume_trend is not None:
+                                body += f"  成交量趋势: {volume_trend:.2f} | 权重: {volume_weights['volume_trend']:.0%}\n"
 
-                        price_weights = config.PRICE_WEIGHTS
-                        if price_trend is not None:
-                            body += f"  价格趋势: {price_trend:.2f} | 权重: {price_weights['price_trend']:.0%}\n"
-                        if price_position is not None:
-                            body += f"  价格位置: {price_position:.2f} | 权重: {price_weights['price_position']:.0%}\n"
-                        if volatility is not None:
-                            body += f"  波动率: {volatility:.2f} | 权重: {price_weights['volatility']:.0%}\n"
+                            # 价格评分详情
+                            body += "【价格评分详情】\n"
+                            price_trend = stock.get('price_trend')
+                            price_position = stock.get('price_position')
+                            volatility = stock.get('volatility')
 
-                        # 最终得分计算
-                        body += "【最终得分计算】\n"
-                        fundamental_score = stock.get('fundamental_score', 0)
-                        volume_score = stock.get('volume_score', 0)
-                        price_score = stock.get('price_score', 0)
-                        total_score = stock.get('score', 0)
+                            price_weights = config.PRICE_WEIGHTS
+                            if price_trend is not None:
+                                body += f"  价格趋势: {price_trend:.2f} | 权重: {price_weights['price_trend']:.0%}\n"
+                            if price_position is not None:
+                                body += f"  价格位置: {price_position:.2f} | 权重: {price_weights['price_position']:.0%}\n"
+                            if volatility is not None:
+                                body += f"  波动率: {volatility:.2f} | 权重: {price_weights['volatility']:.0%}\n"
 
-                        # 获取实际使用的权重
-                        actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
-                        body += f"  三大维度权重配置:\n"
-                        body += f"    基本面权重: {actual_weights['fundamental']:.0%} | 得分: {fundamental_score:.2f}\n"
-                        body += f"    成交量权重: {actual_weights['volume']:.0%} | 得分: {volume_score:.2f}\n"
-                        body += f"    价格权重: {actual_weights['price']:.0%} | 得分: {price_score:.2f}\n"
-                        body += f"  综合得分: {total_score:.2f}\n"
-            else:
-                body += "未找到符合条件的股票\n"
+                            # 最终得分计算
+                            body += "【最终得分计算】\n"
+                            fundamental_score = stock.get('fundamental_score', 0)
+                            volume_score = stock.get('volume_score', 0)
+                            price_score = stock.get('price_score', 0)
+                            total_score = stock.get('score', 0)
+
+                            # 获取实际使用的权重
+                            actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
+                            body += f"  三大维度权重配置:\n"
+                            body += f"    基本面权重: {actual_weights['fundamental']:.0%} | 得分: {fundamental_score:.2f}\n"
+                            body += f"    成交量权重: {actual_weights['volume']:.0%} | 得分: {volume_score:.2f}\n"
+                            body += f"    价格权重: {actual_weights['price']:.0%} | 得分: {price_score:.2f}\n"
+                            body += f"  综合得分: {total_score:.2f}\n"
+                    else:
+                        body += "未找到符合条件的股票\n"
 
             # 发送通知
             success = notifier.send_notification(subject, body, recipients)
