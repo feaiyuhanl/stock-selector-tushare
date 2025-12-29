@@ -11,13 +11,15 @@ from typing import List, Optional
 # 添加上级目录到路径，以便导入config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from .base import BaseNotifier
 
 
-class EmailNotifier:
+class EmailNotifier(BaseNotifier):
     """邮件通知器"""
 
     def __init__(self):
         """初始化邮件通知器"""
+        super().__init__()
         self.config = config.EMAIL_CONFIG
 
         # 从环境变量获取腾讯云密钥，优先级高于配置文件
@@ -30,9 +32,8 @@ class EmailNotifier:
         if not self._check_tencent_config():
             print("[邮件通知] 腾讯云配置不完整，请检查环境变量或config.py中的EMAIL_CONFIG")
             print("[邮件通知] 环境变量: TENCENT_SECRET_ID, TENCENT_SECRET_KEY")
-            self.available = False
+            return
         else:
-            self.available = True
             try:
                 from tencentcloud.common import credential
                 from tencentcloud.common.profile.client_profile import ClientProfile
@@ -53,13 +54,12 @@ class EmailNotifier:
 
                 self.client = ses_client.SesClient(cred, self.tencent_config['region'], client_profile)
                 print("[邮件通知] 腾讯云邮件服务初始化成功")
+                self.available = True
 
             except ImportError:
                 print("[邮件通知] 未安装腾讯云SDK，请运行: pip install tencentcloud-sdk-python")
-                self.available = False
             except Exception as e:
                 print(f"[邮件通知] 腾讯云客户端初始化失败: {e}")
-                self.available = False
 
     def _check_tencent_config(self) -> bool:
         """检查腾讯云配置是否完整"""

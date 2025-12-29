@@ -12,13 +12,15 @@ from typing import List, Optional
 # 添加上级目录到路径，以便导入config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from .base import BaseNotifier
 
 
-class WeChatNotifier:
+class WeChatNotifier(BaseNotifier):
     """企业微信通知器"""
 
     def __init__(self):
         """初始化企业微信通知器"""
+        super().__init__()
         self.config = getattr(config, 'WECHAT_CONFIG', {})
 
         # 从环境变量获取Webhook URL，优先级高于配置文件
@@ -29,7 +31,6 @@ class WeChatNotifier:
             print("[企业微信通知] 未配置Webhook URL，请检查环境变量或config.py中的WECHAT_CONFIG")
             print("[企业微信通知] 环境变量: WECHAT_WEBHOOK_URL")
             print("[企业微信通知] 如何获取: 企业微信 -> 应用与小程序 -> 机器人 -> 添加机器人 -> Webhook")
-            self.available = False
         else:
             self.available = True
             print("[企业微信通知] 企业微信机器人服务初始化成功")

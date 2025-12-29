@@ -941,9 +941,9 @@ def main():
             if notifier and notifier.is_available():
                 recipients = args.notify_to if args.notify_to else config.EMAIL_CONFIG['default_recipients']
 
-            # 构建邮件内容（与控制台输出保持一致）
-            subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            body = f"""
+                # 构建邮件内容（与控制台输出保持一致）
+                subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                body = f"""
 A股选股程序执行完成！
 
 执行参数：
@@ -954,7 +954,7 @@ A股选股程序执行完成！
 
 """
 
-            if not results.empty:
+                if not results.empty:
                 # 数据可用性统计
                 data_availability = _calculate_data_availability(results)
                 body += "\n" + "=" * 60 + "\n"
