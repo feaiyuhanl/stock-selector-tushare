@@ -939,7 +939,9 @@ def main():
         try:
             notifier = get_notifier(args.notify_type)
             if notifier and notifier.is_available():
+                # 使用命令行参数指定的收件人，如果没有则使用配置文件中的默认收件人
                 recipients = args.notify_to if args.notify_to else config.EMAIL_CONFIG['default_recipients']
+                print(f"[{args.notify_type.upper()}通知] 使用收件人: {recipients}")
 
                 # 构建邮件内容（与控制台输出保持一致）
                 subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -1087,12 +1089,46 @@ A股选股程序执行完成！
                     else:
                         body += "未找到符合条件的股票\n"
 
-            # 发送通知
-            success = notifier.send_notification(subject, body, recipients)
-            if success:
-                print(f"\n[{args.notify_type.upper()}通知] 已发送通知到: {', '.join(recipients)}")
+                # 准备股票数据（用于模板发送）
+                stock_data = None
+                if not results.empty:
+                    stock_data = []
+                    for _, stock in results.iterrows():
+                        stock_dict = {
+                            'code': stock.get('code', 'N/A'),
+                            'name': stock.get('name', 'N/A'),
+                            'score': stock.get('score', 0),
+                            'fundamental_score': stock.get('fundamental_score', 0),
+                            'volume_score': stock.get('volume_score', 0),
+                            'price_score': stock.get('price_score', 0),
+                            'current_price': stock.get('current_price'),
+                            'pct_change': stock.get('pct_change'),
+                            'pe_ratio': stock.get('pe_ratio'),
+                            'pb_ratio': stock.get('pb_ratio'),
+                            'roe': stock.get('roe'),
+                            'revenue_growth': stock.get('revenue_growth'),
+                            'profit_growth': stock.get('profit_growth'),
+                        }
+                        stock_data.append(stock_dict)
+                
+                # 计算总股票数（用于模板）
+                total_stocks_count = 0
+                if not results.empty:
+                    # 尝试从selector获取总股票数
+                    # 如果无法获取，则使用返回的股票数作为近似值
+                    total_stocks_count = len(results)
+                    # 可以尝试从selector.strategy获取更准确的总数，但这里先使用简单方式
+                
+                # 发送通知
+                success = notifier.send_notification(subject, body, recipients, 
+                                                    stock_data=stock_data, 
+                                                    total_stocks=total_stocks_count)
+                if success:
+                    print(f"\n[{args.notify_type.upper()}通知] 已发送通知到: {', '.join(recipients)}")
+                else:
+                    print(f"\n[{args.notify_type.upper()}通知] 发送失败，请检查{args.notify_type}配置")
             else:
-                print(f"\n[{args.notify_type.upper()}通知] 发送失败，请检查{args.notify_type}配置")
+                print(f"\n[{args.notify_type.upper()}通知] 服务不可用，请检查配置")
 
         except Exception as e:
             print(f"\n[{args.notify_type.upper()}通知] 发送出错: {e}")

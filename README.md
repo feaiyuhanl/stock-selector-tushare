@@ -153,14 +153,17 @@ python stock_selector.py --top-n 5 --board main
 # Windows PowerShell
 $env:TENCENT_SECRET_ID="AKIDxxxxxxxxxxxxxxxxxx"
 $env:TENCENT_SECRET_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxx"
+$env:TENCENT_FROM_EMAIL="noreply@yourdomain.com"
 
 # Windows CMD
 set TENCENT_SECRET_ID=AKIDxxxxxxxxxxxxxxxxxx
 set TENCENT_SECRET_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxx
+set TENCENT_FROM_EMAIL=noreply@yourdomain.com
 
 # Linux/Mac
 export TENCENT_SECRET_ID="AKIDxxxxxxxxxxxxxxxxxx"
 export TENCENT_SECRET_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxx"
+export TENCENT_FROM_EMAIL="noreply@yourdomain.com"
 ```
 
 **方式二：配置文件配置**
@@ -172,16 +175,18 @@ EMAIL_CONFIG = {
     'enabled': False,  # 运行时通过--email-notify参数启用
     'default_recipients': ['posterhan@126.com'],  # 默认收件人
     'tencent_cloud': {
-        'secret_id': 'AKIDxxxxxxxxxxxxxxxxxx',        # 您的腾讯云SecretId
-        'secret_key': 'xxxxxxxxxxxxxxxxxxxxxxxxxx', # 您的腾讯云SecretKey
+        'secret_id': None,   # 腾讯云SecretId（可从环境变量TENCENT_SECRET_ID获取）
+        'secret_key': None,  # 腾讯云SecretKey（可从环境变量TENCENT_SECRET_KEY获取）
         'region': 'ap-guangzhou',                   # 地域
-        'from_email': 'noreply@yourdomain.com',     # 已验证的发件人邮箱
+        'from_email': None,  # 发件人邮箱（可从环境变量TENCENT_FROM_EMAIL获取）
         'from_name': 'A股选股程序',                 # 发件人名称
     }
 }
 ```
 
-> **注意**: 环境变量配置优先于配置文件配置。如果同时设置了环境变量和配置文件，程序会使用环境变量的值。
+> **注意**: 
+> - 环境变量配置优先于配置文件配置。如果同时设置了环境变量和配置文件，程序会使用环境变量的值。
+> - `from_email` 必须是已在腾讯云SES控制台验证过的发件人邮箱地址。
 
 **5. 测试邮件配置**
 

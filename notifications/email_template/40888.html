@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: 'Georgia', serif; margin: 0; padding: 20px; background: #fafafa; color: #333; }
+        .container { max-width: 700px; margin: 0 auto; background: white; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { border-bottom: 3px solid #0066cc; padding-bottom: 20px; margin-bottom: 30px; }
+        .berkshire-title { color: #0066cc; font-size: 28px; font-weight: bold; margin-bottom: 10px; }
+        .buffett-quote { background: #f0f7ff; padding: 15px; border-left: 4px solid #0066cc; margin: 20px 0; font-style: italic; }
+        .stock-list { margin: 30px 0; }
+        .stock-item { padding: 15px; border-bottom: 1px solid #eee; margin-bottom: 10px; }
+        .stock-symbol { font-weight: bold; color: #0066cc; font-size: 18px; }
+        .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px; color: #666; }
+        .signature { font-style: italic; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="berkshire-title">伯克希尔·哈撒韦投资洞察</div>
+            <div style="color: #666; font-size: 16px;">遵循格雷厄姆与多德的价值投资原则</div>
+        </div>
+        
+        <div style="line-height: 1.6;">
+            <p>尊敬的投资者，</p>
+            
+            <p>正如我在给伯克希尔CEO们的信中所强调的：<em>“我们不可能做到尽善尽美，但我们要努力追求尽善尽美”</em>。基于这一原则，我们的量化系统识别出当前A股市场中符合严格价值投资标准的卓越企业。</p>
+            
+            <div class="buffett-quote">
+                “价格是你付出的，价值是你得到的。今天的市场为我们提供了以合理价格买入卓越公司的机会。”
+            </div>
+
+            <h3>🎯 符合奥马哈标准的A股卓越企业</h3>
+            <div class="stock-list">
+                <!-- 【核心动态部分开始】请将以下HTML块替换为您程序生成的股票列表 -->
+                {{content}}
+                <!-- 【核心动态部分结束】 -->
+            </div>
+
+            <div class="buffett-quote">
+                “球场中央有很多钱可以赚。如果还在纠结某个动作是不是离底线太近，那我们就当它已经在底线之外吧，然后翻篇过去。”
+            </div>
+
+            <p>我们的筛选标准始终如一：寻找具有持久竞争优势（经济护城河）、业务简单易懂、现金流稳定可预测的卓越企业。上述公司符合这些严格标准，但请记住：投资决策应基于个人独立研究。</p>
+        </div>
+
+        <div class="footer">
+            <p><em>“通过定期投资于一系列简单、可理解、具有持久竞争优势的企业，普通投资者完全可以获得非凡的长期回报。” —— 沃伦·巴菲特</em></p>
+            <div class="signature">沃伦·巴菲特投资顾问团队谨上</div>
+            <p>发送时间：{{send_time}} | 本报告基于公开信息分析，不构成投资建议</p>
+        </div>
+    </div>
+</body>
+</html>
