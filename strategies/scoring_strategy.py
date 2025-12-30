@@ -660,7 +660,13 @@ class ScoringStrategy(BaseStrategy):
         if not preloaded_data:
             print("\n【错误】")
             print("  没有成功预加载任何数据，无法进行计算")
-            return pd.DataFrame()
+            empty_df = pd.DataFrame()
+            # 存储总股票数（即使为空也记录）
+            if hasattr(empty_df, 'attrs'):
+                empty_df.attrs['total_stocks_analyzed'] = total
+            else:
+                empty_df._total_stocks_analyzed = total
+            return empty_df
         
         # 基于预加载的数据计算评分（计算阶段）
         results = self.calculate_scores_from_preloaded_data(preloaded_data, stock_name_map)
@@ -765,7 +771,13 @@ class ScoringStrategy(BaseStrategy):
         if not results:
             print("\n【结果】")
             print("  未找到符合条件的股票")
-            return pd.DataFrame()
+            empty_df = pd.DataFrame()
+            # 存储总股票数（即使为空也记录）
+            if hasattr(empty_df, 'attrs'):
+                empty_df.attrs['total_stocks_analyzed'] = total
+            else:
+                empty_df._total_stocks_analyzed = total
+            return empty_df
         
         # 转换为DataFrame并排序
         df = pd.DataFrame(results)
@@ -790,6 +802,14 @@ class ScoringStrategy(BaseStrategy):
         if 'code' in df.columns and 'name' in df.columns:
             cols = ['code', 'name'] + [col for col in df.columns if col not in ['code', 'name']]
             df = df[cols]
+        
+        # 存储总股票数到DataFrame的attrs属性中（pandas 1.3+）
+        # 如果attrs不可用，使用自定义属性作为备选
+        if hasattr(df, 'attrs'):
+            df.attrs['total_stocks_analyzed'] = total
+        else:
+            # 对于旧版本pandas，使用自定义属性
+            df._total_stocks_analyzed = total
         
         return df
 

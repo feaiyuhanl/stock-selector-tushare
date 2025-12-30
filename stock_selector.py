@@ -5,13 +5,196 @@ A股选股程序主程序 - 支持多策略和缓存管理
 import fix_encoding
 
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 from strategies import ScoringStrategy
 from strategies.base_strategy import BaseStrategy
 import config
 import os
 import sys
+import sqlite3
+import threading
+
+
+class NotificationThrottleManager:
+    """通知防骚扰管理器 - 使用SQLite记录当天已发送的邮件地址"""
+    
+    def __init__(self, cache_dir: str = "cache"):
+        """
+        初始化通知防骚扰管理器
+        Args:
+            cache_dir: 缓存目录
+        """
+        self.cache_dir = cache_dir
+        self._ensure_cache_dir()
+        
+        # SQLite数据库文件路径
+        self.db_path = os.path.join(cache_dir, "notification_throttle.db")
+        self._db_lock = threading.Lock()
+        
+        # 初始化数据库
+        self._init_database()
+    
+    def _ensure_cache_dir(self):
+        """确保缓存目录存在"""
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+    
+    def _init_database(self):
+        """初始化SQLite数据库和表结构"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # 创建通知记录表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notification_records (
+                    email TEXT NOT NULL,
+                    send_date TEXT NOT NULL,
+                    send_time TEXT NOT NULL,
+                    PRIMARY KEY (email, send_date)
+                )
+            ''')
+            
+            # 创建索引以提高查询性能
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_email_date 
+                ON notification_records(email, send_date)
+            ''')
+            
+            conn.commit()
+    
+    def is_sent_today(self, email: str) -> bool:
+        """
+        检查指定邮箱地址今天是否已经发送过通知
+        Args:
+            email: 邮箱地址
+        Returns:
+            如果今天已发送过则返回True，否则返回False
+        """
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        with self._db_lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM notification_records
+                        WHERE email = ? AND send_date = ?
+                    ''', (email, today))
+                    count = cursor.fetchone()[0]
+                    return count > 0
+            except Exception as e:
+                print(f"[通知防骚扰] 查询发送记录失败: {e}")
+                return False
+    
+    def mark_as_sent(self, email: str):
+        """
+        标记指定邮箱地址今天已发送通知
+        Args:
+            email: 邮箱地址
+        """
+        today = datetime.now().strftime('%Y-%m-%d')
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        with self._db_lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO notification_records
+                        (email, send_date, send_time)
+                        VALUES (?, ?, ?)
+                    ''', (email, today, now))
+                    conn.commit()
+            except Exception as e:
+                print(f"[通知防骚扰] 记录发送状态失败: {e}")
+    
+    def cleanup_old_records(self, days: int = 7):
+        """
+        清理N天前的记录（可选，定期清理）
+        Args:
+            days: 保留天数，默认7天
+        """
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        
+        with self._db_lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        DELETE FROM notification_records
+                        WHERE send_date < ?
+                    ''', (cutoff_date,))
+                    deleted_count = cursor.rowcount
+                    conn.commit()
+                    if deleted_count > 0:
+                        print(f"[通知防骚扰] 已清理 {deleted_count} 条过期记录")
+            except Exception as e:
+                print(f"[通知防骚扰] 清理过期记录失败: {e}")
+
+
+def is_trading_day_after_15_00(data_fetcher=None) -> bool:
+    """
+    判断当前是否是交易日且在15:00之后（使用tushare交易日历）
+    Args:
+        data_fetcher: DataFetcher实例，用于获取交易日历。如果为None，会创建一个临时实例
+    Returns:
+        如果是交易日且当前时间在15:00之后，返回True；否则返回False
+    """
+    now = datetime.now()
+    current_time = now.time()
+    
+    # 检查是否在15:00之后
+    cutoff_time = datetime.strptime('15:00', '%H:%M').time()
+    if current_time < cutoff_time:
+        return False
+    
+    # 使用交易日历判断今天是否是交易日
+    try:
+        # 如果没有提供data_fetcher，创建一个临时实例
+        if data_fetcher is None:
+            from data.fetcher import DataFetcher
+            data_fetcher = DataFetcher(test_sources=False)
+        
+        # 获取今天的日期（YYYYMMDD格式）
+        today_str = now.strftime('%Y%m%d')
+        
+        # 先从缓存检查
+        is_open = data_fetcher.cache_manager.is_trading_day(today_str)
+        
+        # 如果缓存中没有，获取交易日历
+        if is_open is None:
+            # 获取交易日历（包含今天）
+            trade_cal = data_fetcher.get_trade_calendar(
+                start_date=(now - timedelta(days=30)).strftime('%Y%m%d'),
+                end_date=(now + timedelta(days=30)).strftime('%Y%m%d'),
+                force_refresh=False
+            )
+            
+            if trade_cal is not None and not trade_cal.empty:
+                # 查找今天的交易日状态
+                today_row = trade_cal[trade_cal['cal_date'] == today_str]
+                if not today_row.empty:
+                    is_open = bool(today_row.iloc[0]['is_open'])
+                else:
+                    # 如果交易日历中没有今天的数据，使用周末判断作为后备
+                    weekday = now.weekday()
+                    is_open = weekday < 5  # 周一到周五
+            else:
+                # 如果获取交易日历失败，使用周末判断作为后备
+                weekday = now.weekday()
+                is_open = weekday < 5  # 周一到周五
+        else:
+            is_open = bool(is_open)
+        
+        return is_open
+        
+    except Exception as e:
+        # 如果出现异常，使用周末判断作为后备
+        print(f"[交易日判断] 获取交易日历失败，使用周末判断: {e}")
+        weekday = now.weekday()
+        is_open = weekday < 5  # 周一到周五
+        return is_open
 
 
 class StockSelector:
@@ -851,6 +1034,336 @@ def _print_results(results: pd.DataFrame, selector: StockSelector):
     _print_top5_details(results, selector)
 
 
+def _check_notification_throttle(args, selector, recipients):
+    """
+    检查通知防骚扰条件，过滤收件人列表
+    Args:
+        args: 命令行参数对象
+        selector: StockSelector实例
+        recipients: 原始收件人列表
+    Returns:
+        tuple: (filtered_recipients, throttle_manager) 如果通过检查返回过滤后的收件人列表，否则返回(None, None)
+    """
+    if not args.notify_throttle:
+        return recipients, None
+    
+    # 检查是否是交易日且在15:00之后
+    if not is_trading_day_after_15_00(selector.strategy.data_fetcher):
+        print(f"\n[{args.notify_type.upper()}通知] 防骚扰模式已启用")
+        print(f"[{args.notify_type.upper()}通知] 当前不在交易日15:00之后，跳过发送通知")
+        print(f"[{args.notify_type.upper()}通知] 提示: 使用 --notify-throttle 时，仅在交易日15:00之后发送通知")
+        return None, None
+    
+    # 初始化通知防骚扰管理器
+    throttle_manager = NotificationThrottleManager()
+    
+    # 过滤掉今天已发送过的邮箱地址
+    filtered_recipients = []
+    for email in recipients:
+        if throttle_manager.is_sent_today(email):
+            print(f"[{args.notify_type.upper()}通知] 防骚扰: {email} 今天已发送过通知，跳过")
+        else:
+            filtered_recipients.append(email)
+    
+    if not filtered_recipients:
+        print(f"\n[{args.notify_type.upper()}通知] 防骚扰模式已启用")
+        print(f"[{args.notify_type.upper()}通知] 所有收件人今天都已发送过通知，跳过发送")
+        return None, None
+    
+    print(f"[{args.notify_type.upper()}通知] 防骚扰模式已启用，过滤后收件人: {filtered_recipients}")
+    return filtered_recipients, throttle_manager
+
+
+def _prepare_stock_data_for_notification(results: pd.DataFrame) -> tuple:
+    """
+    准备通知所需的股票数据
+    Args:
+        results: 选股结果DataFrame
+    Returns:
+        tuple: (stock_data, total_stocks_count)
+    """
+    stock_data = None
+    total_stocks_count = 0
+    
+    if not results.empty:
+        # 准备股票数据列表
+        stock_data = []
+        for _, stock in results.iterrows():
+            stock_dict = {
+                'code': stock.get('code', 'N/A'),
+                'name': stock.get('name', 'N/A'),
+                'score': stock.get('score', 0),
+                'fundamental_score': stock.get('fundamental_score', 0),
+                'volume_score': stock.get('volume_score', 0),
+                'price_score': stock.get('price_score', 0),
+                'current_price': stock.get('current_price'),
+                'pct_change': stock.get('pct_change'),
+                'pe_ratio': stock.get('pe_ratio'),
+                'pb_ratio': stock.get('pb_ratio'),
+                'roe': stock.get('roe'),
+                'revenue_growth': stock.get('revenue_growth'),
+                'profit_growth': stock.get('profit_growth'),
+            }
+            stock_data.append(stock_dict)
+        
+        # 计算总股票数（用于模板）
+        if hasattr(results, 'attrs') and 'total_stocks_analyzed' in results.attrs:
+            total_stocks_count = results.attrs['total_stocks_analyzed']
+        elif hasattr(results, '_total_stocks_analyzed'):
+            total_stocks_count = results._total_stocks_analyzed
+        else:
+            total_stocks_count = len(results)
+    
+    return stock_data, total_stocks_count
+
+
+def _build_notification_body(args, results: pd.DataFrame, selector: StockSelector) -> str:
+    """
+    构建通知正文内容
+    Args:
+        args: 命令行参数对象
+        results: 选股结果DataFrame
+        selector: StockSelector实例
+    Returns:
+        str: 通知正文内容
+    """
+    body = f"""
+A股选股程序执行完成！
+
+执行参数：
+- 策略: {args.strategy}
+- TOP-N: {args.top_n}
+- 板块: {', '.join(args.board)}
+- 强制刷新: {'是' if args.refresh else '否'}
+
+"""
+    
+    if results.empty:
+        body += "未找到符合条件的股票\n"
+        return body
+    
+    # 数据可用性统计
+    data_availability = _calculate_data_availability(results)
+    body += "\n" + "=" * 60 + "\n"
+    body += "【数据可用性】\n"
+    body += "=" * 60 + "\n"
+    for dimension, stats in data_availability.items():
+        if stats['total'] > 0:
+            percentage = (stats['available'] / stats['total']) * 100
+            body += f"  {dimension}: {stats['available']}/{stats['total']} ({percentage:.1f}%)\n"
+    
+    # 显示维度信息
+    used_dimensions, actual_weights, dimension_names, dimension_details = _print_dimension_info(selector)
+    body += "\n" + "=" * 60 + "\n"
+    body += "【评分维度说明】\n"
+    body += "=" * 60 + "\n"
+    body += f"使用维度: {', '.join(dimension_names)}\n"
+    for detail in dimension_details:
+        body += f"{detail}\n"
+    
+    # TOP股票表格
+    body += "\n" + "=" * 60 + "\n"
+    ranking_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    body += f"【TOP {len(results)} 只股票】 - 排名时间: {ranking_time}\n"
+    body += "=" * 60 + "\n\n"
+    
+    # 选择要显示的列
+    display_cols = ['code', 'name', 'score', 'fundamental_score', 'volume_score', 'price_score']
+    available_cols = [col for col in display_cols if col in results.columns]
+    
+    # 将DataFrame转换为字符串格式用于邮件
+    table_str = results[available_cols].to_string(index=False)
+    body += table_str + "\n"
+    body += "=" * 60 + "\n"
+    
+    # TOP股票详细指标（邮件中只显示前3只，避免邮件过长）
+    if len(results) > 0:
+        top5 = results.head(min(3, len(results)))
+        body += "\n" + "=" * 60 + "\n"
+        body += "【TOP股票详细指标】\n"
+        body += "=" * 60 + "\n"
+        
+        for idx, (_, stock) in enumerate(top5.iterrows(), 1):
+            code = stock.get('code', 'N/A')
+            name = stock.get('name', 'N/A')
+            
+            # 获取数据获取时间、收盘价、涨跌幅
+            current_price = stock.get('current_price')
+            pct_change = stock.get('pct_change')
+            data_fetch_time = stock.get('data_fetch_time')
+            
+            # 构建股票信息字符串
+            stock_info = f"【第{idx}名】{code} {name}"
+            
+            # 添加价格信息
+            if current_price is not None:
+                stock_info += f" | 收盘价: {current_price:.2f}元"
+            if pct_change is not None:
+                stock_info += f" | 涨跌幅: {pct_change:+.2f}%"
+            if data_fetch_time is not None:
+                if hasattr(data_fetch_time, 'strftime'):
+                    stock_info += f" | 数据时间: {data_fetch_time.strftime('%Y-%m-%d %H:%M')}"
+                else:
+                    stock_info += f" | 数据时间: {data_fetch_time}"
+            
+            body += f"\n{stock_info}\n"
+            body += "-" * 60 + "\n"
+            
+            # 基本面评分详情
+            body += "【基本面评分详情】\n"
+            pe_ratio = stock.get('pe_ratio')
+            pb_ratio = stock.get('pb_ratio')
+            roe = stock.get('roe')
+            revenue_growth = stock.get('revenue_growth')
+            profit_growth = stock.get('profit_growth')
+            
+            fundamental_weights = config.FUNDAMENTAL_WEIGHTS
+            if pe_ratio is not None and pe_ratio > 0:
+                body += f"  市盈率(PE): {pe_ratio:.2f} | 权重: {fundamental_weights['pe_ratio']:.0%}\n"
+            if pb_ratio is not None and pb_ratio > 0:
+                body += f"  市净率(PB): {pb_ratio:.2f} | 权重: {fundamental_weights['pb_ratio']:.0%}\n"
+            if roe is not None:
+                body += f"  净资产收益率(ROE): {roe:.2f}% | 权重: {fundamental_weights['roe']:.0%}\n"
+            if revenue_growth is not None:
+                body += f"  营收增长率: {revenue_growth:.2f}% | 权重: {fundamental_weights['revenue_growth']:.0%}\n"
+            if profit_growth is not None:
+                body += f"  利润增长率: {profit_growth:.2f}% | 权重: {fundamental_weights['profit_growth']:.0%}\n"
+            
+            # 成交量评分详情
+            body += "【成交量评分详情】\n"
+            volume_ratio = stock.get('volume_ratio')
+            turnover_rate = stock.get('turnover_rate')
+            volume_trend = stock.get('volume_trend')
+            
+            volume_weights = config.VOLUME_WEIGHTS
+            if volume_ratio is not None:
+                body += f"  量比: {volume_ratio:.2f} | 权重: {volume_weights['volume_ratio']:.0%}\n"
+            if turnover_rate is not None:
+                body += f"  换手率: {turnover_rate:.2f}% | 权重: {volume_weights['turnover_rate']:.0%}\n"
+            if volume_trend is not None:
+                body += f"  成交量趋势: {volume_trend:.2f} | 权重: {volume_weights['volume_trend']:.0%}\n"
+            
+            # 价格评分详情
+            body += "【价格评分详情】\n"
+            price_trend = stock.get('price_trend')
+            price_position = stock.get('price_position')
+            volatility = stock.get('volatility')
+            
+            price_weights = config.PRICE_WEIGHTS
+            if price_trend is not None:
+                body += f"  价格趋势: {price_trend:.2f} | 权重: {price_weights['price_trend']:.0%}\n"
+            if price_position is not None:
+                body += f"  价格位置: {price_position:.2f} | 权重: {price_weights['price_position']:.0%}\n"
+            if volatility is not None:
+                body += f"  波动率: {volatility:.2f} | 权重: {price_weights['volatility']:.0%}\n"
+            
+            # 最终得分计算
+            body += "【最终得分计算】\n"
+            fundamental_score = stock.get('fundamental_score', 0)
+            volume_score = stock.get('volume_score', 0)
+            price_score = stock.get('price_score', 0)
+            total_score = stock.get('score', 0)
+            
+            # 获取实际使用的权重
+            actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
+            body += f"  三大维度权重配置:\n"
+            body += f"    基本面权重: {actual_weights['fundamental']:.0%} | 得分: {fundamental_score:.2f}\n"
+            body += f"    成交量权重: {actual_weights['volume']:.0%} | 得分: {volume_score:.2f}\n"
+            body += f"    价格权重: {actual_weights['price']:.0%} | 得分: {price_score:.2f}\n"
+            body += f"  综合得分: {total_score:.2f}\n"
+    
+    return body
+
+
+def _send_notification(args, results: pd.DataFrame, selector: StockSelector):
+    """
+    发送通知
+    Args:
+        args: 命令行参数对象
+        results: 选股结果DataFrame
+        selector: StockSelector实例
+    """
+    try:
+        from notifications import get_notifier
+    except ImportError:
+        print(f"\n[{args.notify_type.upper()}通知] 通知模块未安装，无法发送通知")
+        return
+    
+    try:
+        notifier = get_notifier(args.notify_type)
+        if not notifier or not notifier.is_available():
+            print(f"\n[{args.notify_type.upper()}通知] 服务不可用，请检查配置")
+            return
+        
+        # 使用命令行参数指定的收件人，如果没有则使用配置文件中的默认收件人
+        recipients = args.notify_to if args.notify_to else config.EMAIL_CONFIG['default_recipients']
+        
+        # 防骚扰检查
+        filtered_recipients, throttle_manager = _check_notification_throttle(args, selector, recipients)
+        if filtered_recipients is None:
+            return  # 防骚扰检查未通过
+        
+        recipients = filtered_recipients
+        if not args.notify_throttle:
+            print(f"[{args.notify_type.upper()}通知] 使用收件人: {recipients}")
+        
+        # 构建通知内容
+        subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        body = _build_notification_body(args, results, selector)
+        
+        # 准备股票数据
+        stock_data, total_stocks_count = _prepare_stock_data_for_notification(results)
+        
+        # 调试信息：显示实际分析的总股票数和返回的股票数
+        if total_stocks_count > 0:
+            print(f"[{args.notify_type.upper()}通知] 实际分析股票总数: {total_stocks_count} 只，返回TOP股票: {len(results)} 只")
+        
+        # 发送通知
+        success = notifier.send_notification(subject, body, recipients, 
+                                            stock_data=stock_data, 
+                                            total_stocks=total_stocks_count)
+        if success:
+            print(f"\n[{args.notify_type.upper()}通知] 已发送通知到: {', '.join(recipients)}")
+            
+            # 如果启用了防骚扰模式，标记已发送的邮箱地址
+            if args.notify_throttle and throttle_manager:
+                for email in recipients:
+                    throttle_manager.mark_as_sent(email)
+        else:
+            print(f"\n[{args.notify_type.upper()}通知] 发送失败，请检查{args.notify_type}配置")
+    
+    except Exception as e:
+        print(f"\n[{args.notify_type.upper()}通知] 发送出错: {e}")
+        print(f"[提示] 请检查{args.notify_type}配置或网络连接")
+
+
+def _handle_interrupt(selector: StockSelector):
+    """处理用户中断（Ctrl+C）"""
+    print("\n" + "=" * 60)
+    print("程序被用户中断（Ctrl+C）")
+    print("=" * 60)
+    try:
+        saved_count = selector.strategy.data_fetcher.flush_batch_cache()
+        if saved_count > 0:
+            print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
+        print("[提示] 已保存的数据将在下次运行时继续使用，无需重新下载")
+    except Exception as cache_error:
+        print(f"[警告] 保存缓存失败: {cache_error}")
+    print("=" * 60)
+
+
+def _handle_execution_error(selector: StockSelector, error: Exception):
+    """处理执行错误"""
+    print(f"\n程序执行出错: {error}")
+    try:
+        saved_count = selector.strategy.data_fetcher.flush_batch_cache()
+        if saved_count > 0:
+            print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
+    except Exception as cache_error:
+        print(f"[警告] 保存缓存失败: {cache_error}")
+    raise
+
+
 def main():
     """主函数"""
     import argparse
@@ -872,6 +1385,8 @@ def main():
                        choices=['email', 'wechat', 'sms'],
                        help='通知类型 (email: 邮件, wechat: 微信, sms: 短信)')
     parser.add_argument('--notify-to', type=str, nargs='+', help='指定通知接收者（多个接收者用空格分隔）')
+    parser.add_argument('--notify-throttle', action='store_true', 
+                       help='启用通知防骚扰：仅在交易日15:00之后发送，且每个邮箱每天最多发送一次')
     args = parser.parse_args()
 
     # 处理缓存信息查询
@@ -902,237 +1417,17 @@ def main():
             max_workers=args.workers
         )
     except KeyboardInterrupt:
-        print("\n" + "=" * 60)
-        print("程序被用户中断（Ctrl+C）")
-        print("=" * 60)
-        try:
-            # 保存已获取的缓存数据
-            saved_count = selector.strategy.data_fetcher.flush_batch_cache()
-            if saved_count > 0:
-                print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
-            print("[提示] 已保存的数据将在下次运行时继续使用，无需重新下载")
-        except Exception as cache_error:
-            print(f"[警告] 保存缓存失败: {cache_error}")
-        print("=" * 60)
+        _handle_interrupt(selector)
         return
     except Exception as e:
-        print(f"\n程序执行出错: {e}")
-        try:
-            saved_count = selector.strategy.data_fetcher.flush_batch_cache()
-            if saved_count > 0:
-                print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
-        except Exception as cache_error:
-            print(f"[警告] 保存缓存失败: {cache_error}")
-        raise
+        _handle_execution_error(selector, e)
     
     # 打印结果
     _print_results(results, selector)
-
+    
     # 发送通知
     if args.notify:
-        try:
-            from notifications import get_notifier
-        except ImportError:
-            print(f"\n[{args.notify_type.upper()}通知] 通知模块未安装，无法发送通知")
-            return
-
-        try:
-            notifier = get_notifier(args.notify_type)
-            if notifier and notifier.is_available():
-                # 使用命令行参数指定的收件人，如果没有则使用配置文件中的默认收件人
-                recipients = args.notify_to if args.notify_to else config.EMAIL_CONFIG['default_recipients']
-                print(f"[{args.notify_type.upper()}通知] 使用收件人: {recipients}")
-
-                # 构建邮件内容（与控制台输出保持一致）
-                subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                body = f"""
-A股选股程序执行完成！
-
-执行参数：
-- 策略: {args.strategy}
-- TOP-N: {args.top_n}
-- 板块: {', '.join(args.board)}
-- 强制刷新: {'是' if args.refresh else '否'}
-
-"""
-
-                if not results.empty:
-                    # 数据可用性统计
-                    data_availability = _calculate_data_availability(results)
-                    body += "\n" + "=" * 60 + "\n"
-                    body += "【数据可用性】\n"
-                    body += "=" * 60 + "\n"
-                    for dimension, stats in data_availability.items():
-                        if stats['total'] > 0:
-                            percentage = (stats['available'] / stats['total']) * 100
-                            body += f"  {dimension}: {stats['available']}/{stats['total']} ({percentage:.1f}%)\n"
-
-                    # 显示维度信息
-                    used_dimensions, actual_weights, dimension_names, dimension_details = _print_dimension_info(selector)
-                    body += "\n" + "=" * 60 + "\n"
-                    body += "【评分维度说明】\n"
-                    body += "=" * 60 + "\n"
-                    body += f"使用维度: {', '.join(dimension_names)}\n"
-                    for detail in dimension_details:
-                        body += f"{detail}\n"
-
-                    # TOP股票表格
-                    body += "\n" + "=" * 60 + "\n"
-                    ranking_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    body += f"【TOP {len(results)} 只股票】 - 排名时间: {ranking_time}\n"
-                    body += "=" * 60 + "\n\n"
-
-                    # 选择要显示的列
-                    display_cols = ['code', 'name', 'score', 'fundamental_score', 'volume_score', 'price_score']
-                    available_cols = [col for col in display_cols if col in results.columns]
-
-                    # 将DataFrame转换为字符串格式用于邮件
-                    table_str = results[available_cols].to_string(index=False)
-                    body += table_str + "\n"
-                    body += "=" * 60 + "\n"
-
-                    # TOP5股票详细指标（邮件中只显示前3只，避免邮件过长）
-                    if len(results) > 0:
-                        top5 = results.head(min(3, len(results)))  # 邮件中只显示前3只
-                        body += "\n" + "=" * 60 + "\n"
-                        body += "【TOP股票详细指标】\n"
-                        body += "=" * 60 + "\n"
-
-                        for idx, (_, stock) in enumerate(top5.iterrows(), 1):
-                            code = stock.get('code', 'N/A')
-                            name = stock.get('name', 'N/A')
-
-                            # 获取数据获取时间、收盘价、涨跌幅
-                            current_price = stock.get('current_price')
-                            pct_change = stock.get('pct_change')
-                            data_fetch_time = stock.get('data_fetch_time')
-
-                            # 构建股票信息字符串
-                            stock_info = f"【第{idx}名】{code} {name}"
-
-                            # 添加价格信息
-                            if current_price is not None:
-                                stock_info += f" | 收盘价: {current_price:.2f}元"
-                            if pct_change is not None:
-                                stock_info += f" | 涨跌幅: {pct_change:+.2f}%"
-                            if data_fetch_time is not None:
-                                if hasattr(data_fetch_time, 'strftime'):
-                                    stock_info += f" | 数据时间: {data_fetch_time.strftime('%Y-%m-%d %H:%M')}"
-                                else:
-                                    stock_info += f" | 数据时间: {data_fetch_time}"
-
-                            body += f"\n{stock_info}\n"
-                            body += "-" * 60 + "\n"
-
-                            # 基本面评分详情
-                            body += "【基本面评分详情】\n"
-                            pe_ratio = stock.get('pe_ratio')
-                            pb_ratio = stock.get('pb_ratio')
-                            roe = stock.get('roe')
-                            revenue_growth = stock.get('revenue_growth')
-                            profit_growth = stock.get('profit_growth')
-
-                            fundamental_weights = config.FUNDAMENTAL_WEIGHTS
-                            if pe_ratio is not None and pe_ratio > 0:
-                                body += f"  市盈率(PE): {pe_ratio:.2f} | 权重: {fundamental_weights['pe_ratio']:.0%}\n"
-                            if pb_ratio is not None and pb_ratio > 0:
-                                body += f"  市净率(PB): {pb_ratio:.2f} | 权重: {fundamental_weights['pb_ratio']:.0%}\n"
-                            if roe is not None:
-                                body += f"  净资产收益率(ROE): {roe:.2f}% | 权重: {fundamental_weights['roe']:.0%}\n"
-                            if revenue_growth is not None:
-                                body += f"  营收增长率: {revenue_growth:.2f}% | 权重: {fundamental_weights['revenue_growth']:.0%}\n"
-                            if profit_growth is not None:
-                                body += f"  利润增长率: {profit_growth:.2f}% | 权重: {fundamental_weights['profit_growth']:.0%}\n"
-
-                            # 成交量评分详情
-                            body += "【成交量评分详情】\n"
-                            volume_ratio = stock.get('volume_ratio')
-                            turnover_rate = stock.get('turnover_rate')
-                            volume_trend = stock.get('volume_trend')
-
-                            volume_weights = config.VOLUME_WEIGHTS
-                            if volume_ratio is not None:
-                                body += f"  量比: {volume_ratio:.2f} | 权重: {volume_weights['volume_ratio']:.0%}\n"
-                            if turnover_rate is not None:
-                                body += f"  换手率: {turnover_rate:.2f}% | 权重: {volume_weights['turnover_rate']:.0%}\n"
-                            if volume_trend is not None:
-                                body += f"  成交量趋势: {volume_trend:.2f} | 权重: {volume_weights['volume_trend']:.0%}\n"
-
-                            # 价格评分详情
-                            body += "【价格评分详情】\n"
-                            price_trend = stock.get('price_trend')
-                            price_position = stock.get('price_position')
-                            volatility = stock.get('volatility')
-
-                            price_weights = config.PRICE_WEIGHTS
-                            if price_trend is not None:
-                                body += f"  价格趋势: {price_trend:.2f} | 权重: {price_weights['price_trend']:.0%}\n"
-                            if price_position is not None:
-                                body += f"  价格位置: {price_position:.2f} | 权重: {price_weights['price_position']:.0%}\n"
-                            if volatility is not None:
-                                body += f"  波动率: {volatility:.2f} | 权重: {price_weights['volatility']:.0%}\n"
-
-                            # 最终得分计算
-                            body += "【最终得分计算】\n"
-                            fundamental_score = stock.get('fundamental_score', 0)
-                            volume_score = stock.get('volume_score', 0)
-                            price_score = stock.get('price_score', 0)
-                            total_score = stock.get('score', 0)
-
-                            # 获取实际使用的权重
-                            actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
-                            body += f"  三大维度权重配置:\n"
-                            body += f"    基本面权重: {actual_weights['fundamental']:.0%} | 得分: {fundamental_score:.2f}\n"
-                            body += f"    成交量权重: {actual_weights['volume']:.0%} | 得分: {volume_score:.2f}\n"
-                            body += f"    价格权重: {actual_weights['price']:.0%} | 得分: {price_score:.2f}\n"
-                            body += f"  综合得分: {total_score:.2f}\n"
-                    else:
-                        body += "未找到符合条件的股票\n"
-
-                # 准备股票数据（用于模板发送）
-                stock_data = None
-                if not results.empty:
-                    stock_data = []
-                    for _, stock in results.iterrows():
-                        stock_dict = {
-                            'code': stock.get('code', 'N/A'),
-                            'name': stock.get('name', 'N/A'),
-                            'score': stock.get('score', 0),
-                            'fundamental_score': stock.get('fundamental_score', 0),
-                            'volume_score': stock.get('volume_score', 0),
-                            'price_score': stock.get('price_score', 0),
-                            'current_price': stock.get('current_price'),
-                            'pct_change': stock.get('pct_change'),
-                            'pe_ratio': stock.get('pe_ratio'),
-                            'pb_ratio': stock.get('pb_ratio'),
-                            'roe': stock.get('roe'),
-                            'revenue_growth': stock.get('revenue_growth'),
-                            'profit_growth': stock.get('profit_growth'),
-                        }
-                        stock_data.append(stock_dict)
-                
-                # 计算总股票数（用于模板）
-                total_stocks_count = 0
-                if not results.empty:
-                    # 尝试从selector获取总股票数
-                    # 如果无法获取，则使用返回的股票数作为近似值
-                    total_stocks_count = len(results)
-                    # 可以尝试从selector.strategy获取更准确的总数，但这里先使用简单方式
-                
-                # 发送通知
-                success = notifier.send_notification(subject, body, recipients, 
-                                                    stock_data=stock_data, 
-                                                    total_stocks=total_stocks_count)
-                if success:
-                    print(f"\n[{args.notify_type.upper()}通知] 已发送通知到: {', '.join(recipients)}")
-                else:
-                    print(f"\n[{args.notify_type.upper()}通知] 发送失败，请检查{args.notify_type}配置")
-            else:
-                print(f"\n[{args.notify_type.upper()}通知] 服务不可用，请检查配置")
-
-        except Exception as e:
-            print(f"\n[{args.notify_type.upper()}通知] 发送出错: {e}")
-            print(f"[提示] 请检查{args.notify_type}配置或网络连接")
+        _send_notification(args, results, selector)
 
 
 if __name__ == '__main__':

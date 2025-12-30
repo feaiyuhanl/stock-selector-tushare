@@ -1610,6 +1610,89 @@ class DataFetcher:
                 return filtered['code'].tolist()
         return []
     
+    def get_trade_calendar(self, start_date: str = None, end_date: str = None, 
+                          force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """
+        获取交易日历（带缓存，1周刷新一次）
+        Args:
+            start_date: 开始日期，格式：YYYYMMDD，如果为None则使用当前日期往前推1年
+            end_date: 结束日期，格式：YYYYMMDD，如果为None则使用当前日期往后推1年
+            force_refresh: 是否强制刷新缓存
+        Returns:
+            交易日历DataFrame，包含 cal_date 和 is_open 列
+        """
+        try:
+            # 先尝试从缓存读取
+            if not force_refresh:
+                cached_cal = self.cache_manager.get_trade_calendar(force_refresh)
+                if cached_cal is not None and not cached_cal.empty:
+                    # 检查缓存是否包含需要的日期范围
+                    need_fetch = False
+                    if start_date or end_date:
+                        cached_cal['cal_date'] = cached_cal['cal_date'].astype(str)
+                        if start_date and cached_cal['cal_date'].min() > start_date:
+                            # 缓存中没有开始日期之前的数据，需要获取
+                            need_fetch = True
+                        elif end_date and cached_cal['cal_date'].max() < end_date:
+                            # 缓存中没有结束日期之后的数据，需要获取
+                            need_fetch = True
+                    
+                    if not need_fetch:
+                        # 缓存包含所需范围，直接返回
+                        return cached_cal
+                    # 如果需要获取，继续执行后面的API调用逻辑
+            
+            # 从API获取交易日历
+            if self.progress_callback:
+                self.progress_callback('loading', "从网络获取交易日历...")
+            
+            # 如果没有指定日期范围，获取当前日期前后各1年的数据
+            if start_date is None:
+                start_date_obj = datetime.now() - timedelta(days=365)
+                start_date = start_date_obj.strftime('%Y%m%d')
+            if end_date is None:
+                end_date_obj = datetime.now() + timedelta(days=365)
+                end_date = end_date_obj.strftime('%Y%m%d')
+            
+            def fetch_trade_cal():
+                # 获取交易日历（SSE=上海证券交易所）
+                df = self.pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date)
+                if df is not None and not df.empty:
+                    # 确保列名正确（cal_date 和 is_open）
+                    if 'cal_date' not in df.columns and 'exchangeCalDate' in df.columns:
+                        df.rename(columns={'exchangeCalDate': 'cal_date'}, inplace=True)
+                    if 'is_open' not in df.columns and 'isOpen' in df.columns:
+                        df.rename(columns={'isOpen': 'is_open'}, inplace=True)
+                    return df[['cal_date', 'is_open']] if 'cal_date' in df.columns and 'is_open' in df.columns else df
+                return None
+            
+            trade_cal = self._retry_request(fetch_trade_cal, max_retries=3, timeout=30)
+            
+            if trade_cal is not None and not trade_cal.empty:
+                # 保存到缓存
+                self.cache_manager.save_trade_calendar(trade_cal)
+                msg = f"成功获取交易日历 {len(trade_cal)} 条记录"
+                if self.progress_callback:
+                    self.progress_callback('success', msg)
+                else:
+                    print(msg)
+                return trade_cal
+            else:
+                error_msg = "获取交易日历失败：返回数据为空"
+                if self.progress_callback:
+                    self.progress_callback('failed', error_msg)
+                else:
+                    print(error_msg)
+                return None
+                
+        except Exception as e:
+            error_msg = f"获取交易日历失败: {e}"
+            if self.progress_callback:
+                self.progress_callback('failed', error_msg)
+            else:
+                print(error_msg)
+            return None
+    
     def flush_batch_cache(self):
         """刷新批量缓存（将收集的数据批量保存）"""
         total_count = 0

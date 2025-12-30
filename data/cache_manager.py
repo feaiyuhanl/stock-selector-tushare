@@ -37,6 +37,7 @@ class CacheManager:
             'concepts': 7,         # 缓存有效期7天（超过7天自动失效）
             'stock_list': 1,       # 缓存有效期1天（超过1天自动失效）
             'kline': 1,            # 缓存有效期1天（必须是今天，否则失效）
+            'trade_calendar': 7,   # 交易日历缓存有效期7天（每周刷新一次）
         }
 
         # 定义哪些数据类型是低频的（变化频率低，但缓存失效后仍会重新获取）
@@ -142,6 +143,15 @@ class CacheManager:
                     UNIQUE(symbol, cache_type, period, date)
                 )
             ''')
+            
+            # 创建交易日历表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trade_calendar (
+                    cal_date TEXT PRIMARY KEY,  -- 日期，格式：YYYYMMDD
+                    is_open INTEGER NOT NULL,   -- 是否交易日：1=交易日，0=非交易日
+                    update_time TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
 
             # 创建索引以提高查询性能
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_fundamental_code ON fundamental_data(code)')
@@ -151,6 +161,7 @@ class CacheManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_list_code ON stock_list(code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_kline_symbol_type_period ON kline_data(symbol, cache_type, period)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_kline_date ON kline_data(date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_trade_calendar_date ON trade_calendar(cal_date)')
 
             conn.commit()
 
@@ -185,7 +196,8 @@ class CacheManager:
                         'financial': 'financial_data',
                         'sectors': 'stock_sectors',
                         'concepts': 'stock_concepts',
-                        'stock_list': 'stock_list'
+                        'stock_list': 'stock_list',
+                        'trade_calendar': 'trade_calendar'
                     }
 
                     if cache_type not in table_map:
@@ -1119,6 +1131,10 @@ class CacheManager:
                     cursor.execute('DELETE FROM stock_list')
                     print("已清除股票列表缓存")
 
+                elif cache_type == 'trade_calendar':
+                    cursor.execute('DELETE FROM trade_calendar')
+                    print("已清除交易日历缓存")
+
                 else:
                     print(f"未知的缓存类型: {cache_type}")
                     return
@@ -1135,4 +1151,99 @@ class CacheManager:
 
         except Exception as e:
             print(f"清除缓存失败: {e}")
+    
+    def get_trade_calendar(self, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """
+        从缓存获取交易日历
+        Args:
+            force_refresh: 是否强制刷新
+        Returns:
+            交易日历DataFrame，包含 cal_date 和 is_open 列
+        """
+        if force_refresh:
+            return None
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 查询有效的交易日历（未过期，7天内）
+                df = pd.read_sql_query('''
+                    SELECT cal_date, is_open FROM trade_calendar
+                    WHERE update_time >= datetime('now', '-7 day')
+                    ORDER BY cal_date
+                ''', conn)
+                
+                if not df.empty:
+                    return df
+                
+        except Exception as e:
+            print(f"读取交易日历缓存失败: {e}")
+        
+        # 缓存中没有数据，返回None
+        return None
+    
+    def save_trade_calendar(self, trade_cal: pd.DataFrame):
+        """
+        保存交易日历到缓存
+        Args:
+            trade_cal: 交易日历DataFrame，必须包含 cal_date 和 is_open 列
+        """
+        if trade_cal is None or trade_cal.empty:
+            return
+        
+        try:
+            update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # 批量插入或更新数据
+                data_to_insert = []
+                for _, row in trade_cal.iterrows():
+                    cal_date = str(row['cal_date'])
+                    is_open = int(row['is_open']) if pd.notna(row['is_open']) else 0
+                    data_to_insert.append((cal_date, is_open, update_time))
+                
+                # 使用 INSERT OR REPLACE 更新现有数据
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO trade_calendar
+                    (cal_date, is_open, update_time)
+                    VALUES (?, ?, ?)
+                ''', data_to_insert)
+                
+                conn.commit()
+                
+        except Exception as e:
+            print(f"保存交易日历缓存失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def is_trading_day(self, date_str: str) -> Optional[bool]:
+        """
+        检查指定日期是否为交易日
+        Args:
+            date_str: 日期字符串，格式：YYYYMMDD 或 YYYY-MM-DD
+        Returns:
+            如果是交易日返回True，如果不是返回False，如果缓存中没有该日期返回None
+        """
+        # 标准化日期格式为 YYYYMMDD
+        date_str = date_str.replace('-', '')
+        if len(date_str) != 8:
+            return None
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT is_open FROM trade_calendar
+                    WHERE cal_date = ?
+                ''', (date_str,))
+                
+                result = cursor.fetchone()
+                if result:
+                    return bool(result[0])
+                
+        except Exception as e:
+            print(f"查询交易日历失败: {e}")
+        
+        return None
 
