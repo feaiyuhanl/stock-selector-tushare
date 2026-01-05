@@ -61,24 +61,41 @@ def prepare_stock_data_for_notification(results: pd.DataFrame) -> Tuple[Optional
     total_stocks_count = 0
     
     if not results.empty:
+        # 检查是否是指数权重策略（通过检查是否有index_count或weight_change_rate列）
+        is_index_weight = 'index_count' in results.columns or 'weight_change_rate' in results.columns
+        
         # 准备股票数据列表
         stock_data = []
         for _, stock in results.iterrows():
-            stock_dict = {
-                'code': stock.get('code', 'N/A'),
-                'name': stock.get('name', 'N/A'),
-                'score': stock.get('score', 0),
-                'fundamental_score': stock.get('fundamental_score', 0),
-                'volume_score': stock.get('volume_score', 0),
-                'price_score': stock.get('price_score', 0),
-                'current_price': stock.get('current_price'),
-                'pct_change': stock.get('pct_change'),
-                'pe_ratio': stock.get('pe_ratio'),
-                'pb_ratio': stock.get('pb_ratio'),
-                'roe': stock.get('roe'),
-                'revenue_growth': stock.get('revenue_growth'),
-                'profit_growth': stock.get('profit_growth'),
-            }
+            if is_index_weight:
+                # 指数权重策略的数据
+                stock_dict = {
+                    'code': stock.get('code', 'N/A'),
+                    'name': stock.get('name', 'N/A'),
+                    'score': stock.get('score', 0),
+                    'category': stock.get('category', ''),
+                    'index_count': stock.get('index_count', 0),
+                    'weight_change_rate': stock.get('weight_change_rate'),
+                    'trend_slope': stock.get('trend_slope'),
+                    'latest_weight': stock.get('latest_weight'),
+                }
+            else:
+                # 打分策略的数据
+                stock_dict = {
+                    'code': stock.get('code', 'N/A'),
+                    'name': stock.get('name', 'N/A'),
+                    'score': stock.get('score', 0),
+                    'fundamental_score': stock.get('fundamental_score', 0),
+                    'volume_score': stock.get('volume_score', 0),
+                    'price_score': stock.get('price_score', 0),
+                    'current_price': stock.get('current_price'),
+                    'pct_change': stock.get('pct_change'),
+                    'pe_ratio': stock.get('pe_ratio'),
+                    'pb_ratio': stock.get('pb_ratio'),
+                    'roe': stock.get('roe'),
+                    'revenue_growth': stock.get('revenue_growth'),
+                    'profit_growth': stock.get('profit_growth'),
+                }
             stock_data.append(stock_dict)
         
         # 计算总股票数（用于模板）

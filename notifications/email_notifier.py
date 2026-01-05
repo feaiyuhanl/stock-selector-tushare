@@ -249,105 +249,192 @@ class EmailNotifier(BaseNotifier):
             
         Returns:
             dict: 模板数据字典，包含 top_stocks_table_rows, report_time, total_stocks_analyzed
+                  对于指数权重策略，还包含 hs300_table_rows 和 small_mid_table_rows
         """
         report_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # 生成表格行HTML（模板中已有表头，只生成数据行）
+        # 检查是否是指数权重策略（通过检查第一个股票是否有index_count或weight_change_rate字段）
+        is_index_weight = False
         if stock_data and len(stock_data) > 0:
-            table_rows = []
-            for idx, stock in enumerate(stock_data[:10], 1):  # 最多显示10只
+            first_stock = stock_data[0]
+            is_index_weight = 'index_count' in first_stock or 'weight_change_rate' in first_stock
+        
+        if is_index_weight:
+            # 指数权重策略：生成两个表格（沪深300和中小盘）
+            hs300_stocks = [s for s in stock_data if s.get('category') == '沪深300权重股']
+            small_mid_stocks = [s for s in stock_data if s.get('category') == '中小盘']
+            
+            # 生成沪深300表格行
+            hs300_rows = []
+            for idx, stock in enumerate(hs300_stocks[:10], 1):
                 code = stock.get('code', 'N/A')
                 name = stock.get('name', 'N/A')
                 score = stock.get('score', 0)
-                fundamental_score = stock.get('fundamental_score', 0)
-                volume_score = stock.get('volume_score', 0)
-                price_score = stock.get('price_score', 0)
-                current_price = stock.get('current_price')
-                pct_change = stock.get('pct_change')
-                pe_ratio = stock.get('pe_ratio')
-                pb_ratio = stock.get('pb_ratio')
-                roe = stock.get('roe')
-                revenue_growth = stock.get('revenue_growth')
-                profit_growth = stock.get('profit_growth')
+                weight_change_rate = stock.get('weight_change_rate')
+                trend_slope = stock.get('trend_slope')
+                latest_weight = stock.get('latest_weight')
                 
-                # 构建关键亮点：只显示亮点文案，不显示各维度得分
-                highlight_comments = []
+                # 格式化数据
+                weight_change_rate_str = f"{weight_change_rate:.4f}" if weight_change_rate is not None else "N/A"
+                trend_slope_str = f"{trend_slope:.5f}" if trend_slope is not None else "N/A"
+                latest_weight_str = f"{latest_weight:.4f}" if latest_weight is not None else "N/A"
                 
-                # 优先级1：估值优势（最重要）
-                if pe_ratio is not None and pe_ratio > 0:
-                    if pe_ratio < 15:
-                        highlight_comments.append('估值极低')
-                    elif pe_ratio < 25:
-                        highlight_comments.append('估值合理')
+                # 根据评分设置颜色
+                score_class = "score-high" if score >= 80 else "score-medium" if score >= 70 else "score-low"
                 
-                if pb_ratio is not None and pb_ratio > 0:
-                    if pb_ratio < 1.5:
-                        highlight_comments.append('市净率低')
-                
-                # 优先级2：盈利能力
-                if roe is not None:
-                    if roe >= 20:
-                        highlight_comments.append('盈利优秀')
-                    elif roe >= 15:
-                        highlight_comments.append('盈利良好')
-                
-                # 优先级3：成长性
-                if revenue_growth is not None and revenue_growth > 20:
-                    highlight_comments.append('营收高增')
-                if profit_growth is not None and profit_growth > 30:
-                    highlight_comments.append('利润高增')
-                
-                # 优先级4：市场表现
-                if pct_change is not None:
-                    if pct_change > 5:
-                        highlight_comments.append('强势上涨')
-                    elif pct_change > 0:
-                        highlight_comments.append('上涨趋势')
-                
-                # 优先级5：综合评分
-                if score >= 85:
-                    highlight_comments.append('评分优秀')
-                elif score >= 75:
-                    highlight_comments.append('评分良好')
-                
-                # 如果没有任何亮点，使用默认评价
-                if not highlight_comments:
-                    if fundamental_score and fundamental_score > 70:
-                        highlight_comments.append('基本面好')
-                    elif volume_score and volume_score > 70:
-                        highlight_comments.append('成交活跃')
-                    elif price_score and price_score > 70:
-                        highlight_comments.append('趋势良好')
-                    else:
-                        highlight_comments.append('价值低估')
-                
-                # 只显示亮点文案（移动端显示前2个最重要的亮点）
-                highlights_str = ' | '.join(highlight_comments[:2])
-                
-                # 生成表格行（优化移动端显示：调整padding，给股票代码和企业名称更多空间）
                 row = f'''<tr>
-                    <td style="text-align: center; padding: 8px 4px; vertical-align: top; border: 1px solid #ddd; font-size: 12px;">{idx}</td>
-                    <td style="padding: 8px 6px; font-weight: bold; color: #0066cc; vertical-align: top; border: 1px solid #ddd; font-size: 12px; word-break: break-all;">{code}</td>
-                    <td style="padding: 8px 6px; vertical-align: top; border: 1px solid #ddd; font-size: 12px; word-break: break-word;">{html.escape(name)}</td>
-                    <td style="text-align: center; padding: 8px 4px; font-weight: bold; vertical-align: top; border: 1px solid #ddd; font-size: 13px;">{score:.2f}</td>
-                    <td style="padding: 8px 6px; font-size: 11px; color: #555; line-height: 1.4; vertical-align: top; border: 1px solid #ddd; word-break: break-word;">{highlights_str}</td>
+                    <td>{idx}</td>
+                    <td>{code}</td>
+                    <td>{html.escape(name)}</td>
+                    <td class="{score_class}">{score:.2f}</td>
+                    <td>{weight_change_rate_str}</td>
+                    <td>{trend_slope_str}</td>
+                    <td>{latest_weight_str}</td>
                 </tr>'''
-                table_rows.append(row)
+                hs300_rows.append(row)
             
-            # 只生成表格行（模板中已有table和tbody标签）
-            top_stocks_table_rows = '\n'.join(table_rows)
+            if not hs300_rows:
+                hs300_rows = ['<tr><td colspan="7" style="text-align: center; padding: 20px; color: #999;">未找到符合条件的股票</td></tr>']
+            
+            # 生成中小盘表格行
+            small_mid_rows = []
+            for idx, stock in enumerate(small_mid_stocks[:10], 1):
+                code = stock.get('code', 'N/A')
+                name = stock.get('name', 'N/A')
+                score = stock.get('score', 0)
+                weight_change_rate = stock.get('weight_change_rate')
+                trend_slope = stock.get('trend_slope')
+                latest_weight = stock.get('latest_weight')
+                
+                # 格式化数据
+                weight_change_rate_str = f"{weight_change_rate:.4f}" if weight_change_rate is not None else "N/A"
+                trend_slope_str = f"{trend_slope:.5f}" if trend_slope is not None else "N/A"
+                latest_weight_str = f"{latest_weight:.4f}" if latest_weight is not None else "N/A"
+                
+                # 根据评分设置颜色
+                score_class = "score-high" if score >= 80 else "score-medium" if score >= 70 else "score-low"
+                
+                row = f'''<tr>
+                    <td>{idx}</td>
+                    <td>{code}</td>
+                    <td>{html.escape(name)}</td>
+                    <td class="{score_class}">{score:.2f}</td>
+                    <td>{weight_change_rate_str}</td>
+                    <td>{trend_slope_str}</td>
+                    <td>{latest_weight_str}</td>
+                </tr>'''
+                small_mid_rows.append(row)
+            
+            if not small_mid_rows:
+                small_mid_rows = ['<tr><td colspan="7" style="text-align: center; padding: 20px; color: #999;">未找到符合条件的股票</td></tr>']
+            
+            return {
+                'hs300_table_rows': '\n'.join(hs300_rows),
+                'small_mid_table_rows': '\n'.join(small_mid_rows),
+                'report_time': report_time,
+                'total_stocks_analyzed': total_stocks if total_stocks > 0 else (len(stock_data) if stock_data else 0),
+                'send_time': report_time,
+                # 兼容旧版本占位符（用于其他模板）
+                'top_stocks_table_rows': '\n'.join(hs300_rows + small_mid_rows),
+                'content': '\n'.join(hs300_rows + small_mid_rows),
+            }
         else:
-            # 如果没有股票数据，生成空行提示
-            top_stocks_table_rows = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #999; border: 1px solid #ddd;">未找到符合条件的股票</td></tr>'
-        
-        return {
-            'top_stocks_table_rows': top_stocks_table_rows,
-            'report_time': report_time,
-            'total_stocks_analyzed': total_stocks if total_stocks > 0 else (len(stock_data) if stock_data else 0),
-            # 兼容旧版本占位符
-            'content': top_stocks_table_rows,
-            'send_time': report_time
-        }
+            # 打分策略：生成单个表格
+            if stock_data and len(stock_data) > 0:
+                table_rows = []
+                for idx, stock in enumerate(stock_data[:10], 1):  # 最多显示10只
+                    code = stock.get('code', 'N/A')
+                    name = stock.get('name', 'N/A')
+                    score = stock.get('score', 0)
+                    fundamental_score = stock.get('fundamental_score', 0)
+                    volume_score = stock.get('volume_score', 0)
+                    price_score = stock.get('price_score', 0)
+                    current_price = stock.get('current_price')
+                    pct_change = stock.get('pct_change')
+                    pe_ratio = stock.get('pe_ratio')
+                    pb_ratio = stock.get('pb_ratio')
+                    roe = stock.get('roe')
+                    revenue_growth = stock.get('revenue_growth')
+                    profit_growth = stock.get('profit_growth')
+                    
+                    # 构建关键亮点：只显示亮点文案，不显示各维度得分
+                    highlight_comments = []
+                    
+                    # 优先级1：估值优势（最重要）
+                    if pe_ratio is not None and pe_ratio > 0:
+                        if pe_ratio < 15:
+                            highlight_comments.append('估值极低')
+                        elif pe_ratio < 25:
+                            highlight_comments.append('估值合理')
+                    
+                    if pb_ratio is not None and pb_ratio > 0:
+                        if pb_ratio < 1.5:
+                            highlight_comments.append('市净率低')
+                    
+                    # 优先级2：盈利能力
+                    if roe is not None:
+                        if roe >= 20:
+                            highlight_comments.append('盈利优秀')
+                        elif roe >= 15:
+                            highlight_comments.append('盈利良好')
+                    
+                    # 优先级3：成长性
+                    if revenue_growth is not None and revenue_growth > 20:
+                        highlight_comments.append('营收高增')
+                    if profit_growth is not None and profit_growth > 30:
+                        highlight_comments.append('利润高增')
+                    
+                    # 优先级4：市场表现
+                    if pct_change is not None:
+                        if pct_change > 5:
+                            highlight_comments.append('强势上涨')
+                        elif pct_change > 0:
+                            highlight_comments.append('上涨趋势')
+                    
+                    # 优先级5：综合评分
+                    if score >= 85:
+                        highlight_comments.append('评分优秀')
+                    elif score >= 75:
+                        highlight_comments.append('评分良好')
+                    
+                    # 如果没有任何亮点，使用默认评价
+                    if not highlight_comments:
+                        if fundamental_score and fundamental_score > 70:
+                            highlight_comments.append('基本面好')
+                        elif volume_score and volume_score > 70:
+                            highlight_comments.append('成交活跃')
+                        elif price_score and price_score > 70:
+                            highlight_comments.append('趋势良好')
+                        else:
+                            highlight_comments.append('价值低估')
+                    
+                    # 只显示亮点文案（移动端显示前2个最重要的亮点）
+                    highlights_str = ' | '.join(highlight_comments[:2])
+                    
+                    # 生成表格行（优化移动端显示：调整padding，给股票代码和企业名称更多空间）
+                    row = f'''<tr>
+                        <td style="text-align: center; padding: 8px 4px; vertical-align: top; border: 1px solid #ddd; font-size: 12px;">{idx}</td>
+                        <td style="padding: 8px 6px; font-weight: bold; color: #0066cc; vertical-align: top; border: 1px solid #ddd; font-size: 12px; word-break: break-all;">{code}</td>
+                        <td style="padding: 8px 6px; vertical-align: top; border: 1px solid #ddd; font-size: 12px; word-break: break-word;">{html.escape(name)}</td>
+                        <td style="text-align: center; padding: 8px 4px; font-weight: bold; vertical-align: top; border: 1px solid #ddd; font-size: 13px;">{score:.2f}</td>
+                        <td style="padding: 8px 6px; font-size: 11px; color: #555; line-height: 1.4; vertical-align: top; border: 1px solid #ddd; word-break: break-word;">{highlights_str}</td>
+                    </tr>'''
+                    table_rows.append(row)
+                
+                # 只生成表格行（模板中已有table和tbody标签）
+                top_stocks_table_rows = '\n'.join(table_rows)
+            else:
+                # 如果没有股票数据，生成空行提示
+                top_stocks_table_rows = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #999; border: 1px solid #ddd;">未找到符合条件的股票</td></tr>'
+            
+            return {
+                'top_stocks_table_rows': top_stocks_table_rows,
+                'report_time': report_time,
+                'total_stocks_analyzed': total_stocks if total_stocks > 0 else (len(stock_data) if stock_data else 0),
+                # 兼容旧版本占位符
+                'content': top_stocks_table_rows,
+                'send_time': report_time
+            }
     
     def _format_html_body(self, text_body: str) -> str:
         """
