@@ -4,4 +4,5 @@ numpy>=1.24.0
 openpyxl>=3.1.0
 tqdm>=4.65.0
 tencentcloud-sdk-python>=3.0.0
+scipy>=1.10.0  # 用于指数权重策略的趋势计算（可选，代码会自动降级到简单线性拟合）
 

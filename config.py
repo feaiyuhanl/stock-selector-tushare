@@ -96,3 +96,33 @@ WECHAT_CONFIG = {
     # 4. 复制Webhook URL配置到环境变量或此处
 }
 
+# 指数权重策略配置
+INDEX_WEIGHT_CONFIG = {
+    # 追踪的指数列表
+    'tracked_indices': [
+        '000300.SH',  # 沪深300
+        '000905.SH',  # 中证500
+        '932000.CSI',  # 中证2000（跨市场指数，使用CSI后缀）
+    ],
+    
+    # 指数名称映射
+    'index_names': {
+        '000300.SH': '沪深300',
+        '000905.SH': '中证500',
+        '932000.CSI': '中证2000',
+    },
+    
+    # 回看天数（用于计算趋势）
+    'lookback_days': 60,
+    
+    # 评分权重
+    'score_weights': {
+        'weight_change_rate': 0.50,    # 权重变化率权重
+        'trend_slope': 0.30,           # 趋势斜率权重
+        'weight_absolute': 0.20,        # 权重绝对值权重
+    },
+    
+    # 多指数加分系数
+    'multi_index_bonus': 1.1,  # 在多个指数中都有上升趋势时，得分乘以该系数
+}
+
