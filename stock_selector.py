@@ -109,8 +109,11 @@ def _send_notification(args, results: pd.DataFrame, selector: StockSelector):
             print(f"\n[邮件通知] 服务不可用，请检查配置")
             return
         
-        # 收件人从配置文件读取（config.py 中的 EMAIL_CONFIG['default_recipients']）
-        recipients = config.EMAIL_CONFIG['default_recipients']
+        # 收件人优先从命令行参数获取，如果没有指定则从配置文件读取
+        if args.notify_to:
+            recipients = args.notify_to
+        else:
+            recipients = config.EMAIL_CONFIG['default_recipients']
         
         # 防骚扰检查
         filtered_recipients, throttle_manager = check_notification_throttle(args, selector, recipients)
@@ -308,6 +311,8 @@ def main():
     
     parser.add_argument('--notify', action='store_true',
                        help='启用邮件通知功能（收件人从 config.py 的 EMAIL_CONFIG[\'default_recipients\'] 读取）')
+    parser.add_argument('--notify-to', type=str, nargs='+',
+                       help='指定邮件通知的收件人邮箱列表（可指定多个），如：--notify-to email1@example.com email2@example.com。如果不指定，则使用 config.py 中的 default_recipients')
     parser.add_argument('--notify-throttle', action='store_true', 
                        help='启用通知防骚扰：仅在交易日15:00之后发送，且每个邮箱每天最多发送一次')
     args = parser.parse_args()
