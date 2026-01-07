@@ -124,5 +124,8 @@ INDEX_WEIGHT_CONFIG = {
     
     # 多指数加分系数
     'multi_index_bonus': 1.1,  # 在多个指数中都有上升趋势时，得分乘以该系数
+    
+    # 邮件通知模板ID（指数权重策略专用）
+    'email_template_id': 41115,  # 指数权重策略的邮件模板ID
 }
 

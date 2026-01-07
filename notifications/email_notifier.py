@@ -152,7 +152,20 @@ class EmailNotifier(BaseNotifier):
 
             # 检查是否使用模板发送
             use_template = self.tencent_config.get('use_template', False)
-            template_id = self.tencent_config.get('template_id')
+            
+            # 根据策略类型选择模板ID
+            # 判断是否是指数权重策略（通过检查股票数据）
+            is_index_weight = False
+            if stock_data and len(stock_data) > 0:
+                first_stock = stock_data[0]
+                is_index_weight = 'index_count' in first_stock or 'weight_change_rate' in first_stock
+            
+            if is_index_weight:
+                # 指数权重策略：使用专用模板ID
+                template_id = config.INDEX_WEIGHT_CONFIG.get('email_template_id') or self.tencent_config.get('template_id')
+            else:
+                # 其他策略（如综合打分策略）：使用默认模板ID
+                template_id = self.tencent_config.get('template_id')
             
             if use_template and template_id:
                 # 使用模板发送

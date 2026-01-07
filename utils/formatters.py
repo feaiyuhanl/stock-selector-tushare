@@ -571,29 +571,44 @@ def print_final_score_calculation(stock: pd.Series, selector):
     price_score = stock.get('price_score', 0)
     total_score = stock.get('score', 0)
 
-    # 获取实际使用的权重
-    actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
+    # 获取实际使用的权重（兼容不同策略类型）
+    strategy = selector.strategy
+    if hasattr(strategy, 'weights'):
+        # 综合打分策略
+        actual_weights = getattr(strategy, '_last_adjusted_weights', strategy.weights)
+        print("  三大维度权重配置:")
+        for dim_key, weight in actual_weights.items():
+            if weight > 0:
+                dim_name = {
+                    'fundamental': '基本面',
+                    'volume': '成交量',
+                    'price': '价格'
+                }.get(dim_key, dim_key)
+                print(f"    {dim_name}: {weight*100:.1f}%")
 
-    print("  三大维度权重配置:")
-    for dim_key, weight in actual_weights.items():
-        if weight > 0:
-            dim_name = {
-                'fundamental': '基本面',
-                'volume': '成交量',
-                'price': '价格'
-            }.get(dim_key, dim_key)
-            print(f"    {dim_name}: {weight*100:.1f}%")
-
-    print("\n  三大维度贡献计算:")
-    if actual_weights.get('fundamental', 0) > 0:
-        contribution = fundamental_score * actual_weights['fundamental']
-        print(f"    基本面: {fundamental_score:.2f} × {actual_weights['fundamental']*100:.1f}% = {contribution:.2f}")
-    if actual_weights.get('volume', 0) > 0:
-        contribution = volume_score * actual_weights['volume']
-        print(f"    成交量: {volume_score:.2f} × {actual_weights['volume']*100:.1f}% = {contribution:.2f}")
-    if actual_weights.get('price', 0) > 0:
-        contribution = price_score * actual_weights['price']
-        print(f"    价格: {price_score:.2f} × {actual_weights['price']*100:.1f}% = {contribution:.2f}")
+        print("\n  三大维度贡献计算:")
+        if actual_weights.get('fundamental', 0) > 0:
+            contribution = fundamental_score * actual_weights['fundamental']
+            print(f"    基本面: {fundamental_score:.2f} × {actual_weights['fundamental']*100:.1f}% = {contribution:.2f}")
+        if actual_weights.get('volume', 0) > 0:
+            contribution = volume_score * actual_weights['volume']
+            print(f"    成交量: {volume_score:.2f} × {actual_weights['volume']*100:.1f}% = {contribution:.2f}")
+        if actual_weights.get('price', 0) > 0:
+            contribution = price_score * actual_weights['price']
+            print(f"    价格: {price_score:.2f} × {actual_weights['price']*100:.1f}% = {contribution:.2f}")
+    elif hasattr(strategy, 'score_weights'):
+        # 指数权重策略
+        actual_weights = strategy.score_weights
+        print("  指数权重评分维度:")
+        weight_change_rate = stock.get('weight_change_rate')
+        trend_slope = stock.get('trend_slope')
+        weight_absolute = stock.get('weight_absolute')
+        if weight_change_rate is not None:
+            print(f"    权重变化率: {weight_change_rate:.4f} | 权重: {actual_weights.get('weight_change_rate', 0)*100:.1f}%")
+        if trend_slope is not None:
+            print(f"    趋势斜率: {trend_slope:.5f} | 权重: {actual_weights.get('trend_slope', 0)*100:.1f}%")
+        if weight_absolute is not None:
+            print(f"    权重绝对值: {weight_absolute:.4f} | 权重: {actual_weights.get('weight_absolute', 0)*100:.1f}%")
 
     print(f"\n  综合得分: {total_score:.2f}")
 

@@ -258,13 +258,33 @@ A股选股程序执行完成！
             price_score = stock.get('price_score', 0)
             total_score = stock.get('score', 0)
             
-            # 获取实际使用的权重
-            actual_weights = getattr(selector.strategy, '_last_adjusted_weights', selector.strategy.weights)
-            body += f"  三大维度权重配置:\n"
-            body += f"    基本面权重: {actual_weights['fundamental']:.0%} | 得分: {fundamental_score:.2f}\n"
-            body += f"    成交量权重: {actual_weights['volume']:.0%} | 得分: {volume_score:.2f}\n"
-            body += f"    价格权重: {actual_weights['price']:.0%} | 得分: {price_score:.2f}\n"
-            body += f"  综合得分: {total_score:.2f}\n"
+            # 获取实际使用的权重（兼容不同策略类型）
+            strategy = selector.strategy
+            if hasattr(strategy, 'weights'):
+                # 综合打分策略
+                actual_weights = getattr(strategy, '_last_adjusted_weights', strategy.weights)
+                body += f"  三大维度权重配置:\n"
+                body += f"    基本面权重: {actual_weights['fundamental']:.0%} | 得分: {fundamental_score:.2f}\n"
+                body += f"    成交量权重: {actual_weights['volume']:.0%} | 得分: {volume_score:.2f}\n"
+                body += f"    价格权重: {actual_weights['price']:.0%} | 得分: {price_score:.2f}\n"
+                body += f"  综合得分: {total_score:.2f}\n"
+            elif hasattr(strategy, 'score_weights'):
+                # 指数权重策略
+                actual_weights = strategy.score_weights
+                weight_change_rate = stock.get('weight_change_rate')
+                trend_slope = stock.get('trend_slope')
+                weight_absolute = stock.get('weight_absolute')
+                body += f"  指数权重评分维度:\n"
+                if weight_change_rate is not None:
+                    body += f"    权重变化率: {weight_change_rate:.4f} | 权重: {actual_weights.get('weight_change_rate', 0):.0%}\n"
+                if trend_slope is not None:
+                    body += f"    趋势斜率: {trend_slope:.5f} | 权重: {actual_weights.get('trend_slope', 0):.0%}\n"
+                if weight_absolute is not None:
+                    body += f"    权重绝对值: {weight_absolute:.4f} | 权重: {actual_weights.get('weight_absolute', 0):.0%}\n"
+                body += f"  综合得分: {total_score:.2f}\n"
+            else:
+                # 其他策略类型，只显示得分
+                body += f"  综合得分: {total_score:.2f}\n"
     
     return body
 
