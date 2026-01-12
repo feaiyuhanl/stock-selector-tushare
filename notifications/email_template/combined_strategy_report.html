@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>综合选股策略报告</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            color: #1a1a1a;
+            line-height: 1.6;
+            padding: 40px 20px;
+        }
+        .email-wrapper {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 50%, #1e3c72 100%);
+            color: #ffffff;
+            padding: 50px 40px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            animation: pulse 20s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+        .header-content {
+            position: relative;
+            z-index: 1;
+        }
+        .header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            margin: 0 0 12px 0;
+            letter-spacing: 2px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        .header .subtitle {
+            font-size: 16px;
+            opacity: 0.95;
+            font-weight: 300;
+            margin: 0;
+            letter-spacing: 1px;
+        }
+        .header .timestamp {
+            font-size: 14px;
+            opacity: 0.85;
+            margin-top: 8px;
+            font-weight: 300;
+        }
+        .greeting {
+            padding: 35px 40px 25px 40px;
+            background: #ffffff;
+            border-bottom: 1px solid #e8ecf0;
+        }
+        .greeting-text {
+            font-size: 15px;
+            color: #2c3e50;
+            line-height: 1.8;
+            text-align: justify;
+        }
+        .content {
+            padding: 40px;
+            background: #ffffff;
+        }
+        .section {
+            margin-bottom: 50px;
+        }
+        .section:last-child {
+            margin-bottom: 0;
+        }
+        .section-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #2a5298;
+        }
+        .section-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            color: #ffffff;
+            font-size: 20px;
+            font-weight: bold;
+        }
+        .section-title {
+            font-size: 24px;
+            font-weight: 700;
+            color: #1e3c72;
+            margin: 0;
+            letter-spacing: 0.5px;
+        }
+        .section-description {
+            color: #555;
+            font-size: 14px;
+            margin: 0 0 25px 0;
+            padding: 15px 20px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border-left: 4px solid #2a5298;
+            border-radius: 4px;
+            line-height: 1.8;
+        }
+        .table-wrapper {
+            overflow-x: auto;
+            margin: 25px 0;
+            border-radius: 8px;
+            border: 1px solid #e8ecf0;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            font-size: 14px;
+        }
+        thead {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+        }
+        th {
+            padding: 16px 14px;
+            text-align: left;
+            font-weight: 600;
+            color: #ffffff;
+            white-space: nowrap;
+            font-size: 13px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        th:first-child {
+            text-align: center;
+            width: 60px;
+        }
+        th:nth-child(2), th:nth-child(3) {
+            min-width: 110px;
+        }
+        th:nth-child(4) {
+            text-align: center;
+            min-width: 90px;
+        }
+        th:nth-child(5), th:nth-child(6), th:nth-child(7) {
+            text-align: center;
+            min-width: 100px;
+        }
+        /* 基本面价格打分策略表格特殊列宽 */
+        .fundamental-table th:nth-child(5) {
+            text-align: left;
+            min-width: 200px;
+        }
+        tbody tr {
+            border-bottom: 1px solid #e8ecf0;
+            transition: all 0.3s ease;
+        }
+        tbody tr:hover {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            transform: translateX(2px);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+        tbody tr:nth-child(even) {
+            background: #fafbfc;
+        }
+        tbody tr:nth-child(even):hover {
+            background: linear-gradient(135deg, #f0f2f5 0%, #e1e4e8 100%);
+        }
+        td {
+            padding: 14px;
+            vertical-align: middle;
+            color: #2c3e50;
+            font-size: 13px;
+        }
+        td:first-child {
+            text-align: center;
+            font-weight: 600;
+            color: #1e3c72;
+        }
+        td:nth-child(2) {
+            font-weight: 600;
+            color: #0066cc;
+        }
+        td:nth-child(4) {
+            text-align: center;
+            font-weight: 700;
+            font-size: 15px;
+            color: #1e3c72;
+        }
+        td:nth-child(5), td:nth-child(6), td:nth-child(7) {
+            text-align: center;
+            color: #555;
+        }
+        /* 基本面价格打分策略表格特殊样式 */
+        .fundamental-table td:nth-child(5) {
+            text-align: left;
+            font-size: 12px;
+            color: #555;
+        }
+        .score-high {
+            color: #28a745;
+        }
+        .score-medium {
+            color: #ffc107;
+        }
+        .score-low {
+            color: #dc3545;
+        }
+        .footer {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #ffffff;
+            padding: 40px;
+            text-align: center;
+        }
+        .footer-content {
+            margin-bottom: 20px;
+        }
+        .footer-text {
+            font-size: 14px;
+            line-height: 1.8;
+            margin: 0 0 10px 0;
+            opacity: 0.95;
+        }
+        .footer-time {
+            font-size: 13px;
+            opacity: 0.85;
+            margin: 15px 0 0 0;
+            font-weight: 300;
+        }
+        .disclaimer {
+            margin-top: 25px;
+            padding-top: 25px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+            font-size: 12px;
+            line-height: 1.8;
+            opacity: 0.9;
+        }
+        .disclaimer strong {
+            font-weight: 600;
+        }
+        .signature {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+            font-size: 13px;
+            opacity: 0.9;
+            text-align: right;
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 20px 10px;
+            }
+            .header {
+                padding: 35px 25px;
+            }
+            .header h1 {
+                font-size: 24px;
+            }
+            .greeting {
+                padding: 25px 20px 20px 20px;
+            }
+            .content {
+                padding: 25px 20px;
+            }
+            .section-title {
+                font-size: 18px;
+            }
+            th, td {
+                padding: 10px 8px;
+                font-size: 12px;
+            }
+            .table-wrapper {
+                border-radius: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-wrapper">
+        <div class="header">
+            <div class="header-content">
+                <h1>综合选股策略报告</h1>
+                <div class="subtitle">Combined Stock Selection Strategy Report</div>
+                <div class="timestamp">报告时间：{{send_time}}</div>
+            </div>
+        </div>
+
+        <div class="greeting">
+            <div class="greeting-text">
+                尊敬的投资者，您好！<br><br>
+                谨呈上本次综合选股策略分析报告，本报告整合了指数权重选股策略和多因子打分策略，为您提供多维度、全方位的投资参考。<br><br>
+                本报告数据来源于公开市场信息，采用专业的量化分析模型，旨在为您提供客观、专业的投资参考。投资有风险，决策需谨慎，请您根据自身情况独立判断。
+            </div>
+        </div>
+
+        <div class="content">
+            <!-- 第一部分：指数权重选股策略 -->
+            <div class="section">
+                <div class="section-header">
+                    <div class="section-icon">📊</div>
+                    <h2 class="section-title">指数权重选股策略</h2>
+                </div>
+                <div class="section-description">
+                    基于主要指数成分股权重变化趋势，筛选出权重上升潜力较大的优质标的。评分综合考虑权重变化率、趋势斜率和权重绝对值三个维度，权重变化率反映短期资金流向，趋势斜率反映长期趋势强度，权重绝对值反映在指数中的重要性。
+                </div>
+
+                <!-- 沪深300权重股 -->
+                <div class="section">
+                    <div class="section-header">
+                        <div class="section-icon">🏆</div>
+                        <h3 class="section-title" style="font-size: 20px;">沪深300权重股 TOP 10</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>排名</th>
+                                    <th>股票代码</th>
+                                    <th>股票名称</th>
+                                    <th>综合评分</th>
+                                    <th>权重变化率</th>
+                                    <th>趋势斜率</th>
+                                    <th>最新权重(%)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{hs300_table_rows}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 中小盘股票 -->
+                <div class="section">
+                    <div class="section-header">
+                        <div class="section-icon">📈</div>
+                        <h3 class="section-title" style="font-size: 20px;">中小盘股票 TOP 10</h3>
+                    </div>
+                    <div class="section-description">
+                        基于中证500和中证2000指数成分股权重变化趋势，筛选出中小盘股票中权重上升潜力较大的标的。中小盘股票具有更高的成长性和弹性，适合追求超额收益的投资者关注。
+                    </div>
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>排名</th>
+                                    <th>股票代码</th>
+                                    <th>股票名称</th>
+                                    <th>综合评分</th>
+                                    <th>权重变化率</th>
+                                    <th>趋势斜率</th>
+                                    <th>最新权重(%)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{small_mid_table_rows}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 第二部分：多因子打分策略 -->
+                <div class="section">
+                    <div class="section-header">
+                        <div class="section-icon">💎</div>
+                        <h2 class="section-title">多因子打分策略</h2>
+                    </div>
+                <div class="section-description">
+                    综合考虑基本面指标、成交量指标和价格指标，通过多维度量化评分筛选出综合表现优秀的标的。评分维度包括：<strong>基本面评分</strong>：PE市盈率、PB市净率、ROE净资产收益率、营收增长率、利润增长率；<strong>成交量评分</strong>：量比、换手率、成交量趋势；<strong>价格评分</strong>：价格趋势、价格位置、波动率。适合追求价值与成长并重、注重多维度综合表现的投资者。
+                </div>
+                <div class="table-wrapper">
+                    <table class="fundamental-table">
+                        <thead>
+                            <tr>
+                                <th>排名</th>
+                                <th>股票代码</th>
+                                <th>股票名称</th>
+                                <th>综合评分</th>
+                                <th>投资亮点</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{top_stocks_table_rows}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-content">
+                <div class="footer-text">
+                    本报告由智能量化选股系统自动生成<br>
+                    数据来源于公开市场信息，仅供参考
+                </div>
+                <div class="footer-time">生成时间：{{send_time}}</div>
+            </div>
+            <div class="disclaimer">
+                <strong>风险提示：</strong>本报告不构成投资建议。投资有风险，决策需谨慎。请根据自身情况独立判断，理性投资。过往业绩不代表未来表现，市场有风险，投资需谨慎。
+            </div>
+            <div class="signature">
+                此致<br>
+                敬礼<br><br>
+                智能量化选股系统<br>
+                {{send_time}}
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+

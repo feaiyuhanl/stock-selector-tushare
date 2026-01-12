@@ -101,6 +101,97 @@ class EmailNotifier(BaseNotifier):
             return False
         return True
 
+    def send_combined_notification(self, subject: str, recipients: List[str],
+                                   stock_data_fundamental: Optional[List[Dict]] = None,
+                                   stock_data_index_weight: Optional[List[Dict]] = None,
+                                   total_stocks: int = 0) -> bool:
+        """
+        发送合并策略邮件通知（同时包含两个策略的结果）
+
+        Args:
+            subject: 邮件主题
+            recipients: 收件人列表
+            stock_data_fundamental: 多因子打分策略的股票数据列表
+            stock_data_index_weight: 指数权重策略的股票数据列表
+            total_stocks: 分析的股票总数
+
+        Returns:
+            bool: 发送是否成功
+        """
+        if not self.available:
+            print("[邮件通知] 邮件服务不可用")
+            return False
+
+        if not recipients:
+            print("[邮件通知] 未指定收件人")
+            return False
+
+        # 过滤掉空字符串和None值
+        valid_recipients = [email for email in recipients if email and isinstance(email, str) and email.strip()]
+        
+        if not valid_recipients:
+            print(f"[邮件通知] 收件人列表中无有效的邮箱地址")
+            return False
+
+        try:
+            from tencentcloud.ses.v20201002 import models
+
+            # 创建邮件请求
+            req = models.SendEmailRequest()
+
+            # 设置发件人
+            req.FromEmailAddress = self.tencent_config['from_email']
+
+            # 设置收件人
+            req.Destination = valid_recipients
+
+            # 设置邮件主题
+            req.Subject = subject
+
+            # 使用合并策略模板
+            use_template = self.tencent_config.get('use_template', False)
+            template_id = self.tencent_config.get('combined_template_id') or config.EMAIL_CONFIG['tencent_cloud'].get('combined_template_id', 41280)
+            
+            if use_template and template_id:
+                # 使用模板发送
+                print(f"[邮件通知] 使用合并策略模板发送，模板ID: {template_id}")
+                
+                # 生成模板数据
+                template_data = self._generate_combined_template_data(
+                    stock_data_fundamental, stock_data_index_weight, total_stocks
+                )
+                
+                # 设置模板
+                template = models.Template()
+                template.TemplateID = template_id
+                template.TemplateData = json.dumps(template_data, ensure_ascii=False)
+                
+                req.Template = template
+                print(f"[邮件通知] 合并策略模板数据已生成:")
+                print(f"[邮件通知]   - hs300_table_rows: {len(template_data.get('hs300_table_rows', ''))} 字符")
+                print(f"[邮件通知]   - small_mid_table_rows: {len(template_data.get('small_mid_table_rows', ''))} 字符")
+                print(f"[邮件通知]   - top_stocks_table_rows: {len(template_data.get('top_stocks_table_rows', ''))} 字符")
+                print(f"[邮件通知]   - send_time: {template_data.get('send_time', 'N/A')}")
+            else:
+                print("[邮件通知] 合并策略必须使用模板发送")
+                return False
+
+            # 发送邮件
+            resp = self.client.SendEmail(req)
+
+            # 检查响应
+            if resp.MessageId:
+                print(f"[邮件通知] 邮件发送成功，消息ID: {resp.MessageId}")
+                return True
+            else:
+                print("[邮件通知] 邮件发送失败，无效响应")
+                return False
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[邮件通知] 发送邮件失败: {error_msg}")
+            return False
+
     def send_notification(self, subject: str, body: str, recipients: List[str], 
                          stock_data: Optional[List[Dict]] = None, total_stocks: int = 0) -> bool:
         """
@@ -250,6 +341,182 @@ class EmailNotifier(BaseNotifier):
                 print("[邮件通知] 3. 或者使用模板发送方式（需要先创建邮件模板）")
                 print("[邮件通知] 详情请参考：https://console.cloud.tencent.com/ses")
             return False
+
+    def _generate_combined_template_data(
+        self, 
+        stock_data_fundamental: Optional[List[Dict]], 
+        stock_data_index_weight: Optional[List[Dict]], 
+        total_stocks: int = 0
+    ) -> Dict:
+        """
+        生成合并策略模板数据，包含两个策略的结果
+        
+        Args:
+            stock_data_fundamental: 多因子打分策略的股票数据列表
+            stock_data_index_weight: 指数权重策略的股票数据列表
+            total_stocks: 分析的股票总数
+            
+        Returns:
+            dict: 模板数据字典，包含 hs300_table_rows, small_mid_table_rows, top_stocks_table_rows, send_time
+        """
+        report_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 处理指数权重策略数据：分为沪深300和中小盘
+        hs300_stocks = []
+        small_mid_stocks = []
+        
+        if stock_data_index_weight:
+            for stock in stock_data_index_weight:
+                category = stock.get('category', '')
+                if category == '沪深300权重股':
+                    hs300_stocks.append(stock)
+                elif category == '中小盘':
+                    small_mid_stocks.append(stock)
+        
+        # 生成沪深300表格行
+        hs300_rows = []
+        for idx, stock in enumerate(hs300_stocks[:10], 1):
+            code = stock.get('code', 'N/A')
+            name = stock.get('name', 'N/A')
+            score = stock.get('score', 0)
+            weight_change_rate = stock.get('weight_change_rate')
+            trend_slope = stock.get('trend_slope')
+            latest_weight = stock.get('latest_weight')
+            
+            # 格式化数据
+            weight_change_rate_str = f"{weight_change_rate:.4f}" if weight_change_rate is not None else "N/A"
+            trend_slope_str = f"{trend_slope:.5f}" if trend_slope is not None else "N/A"
+            latest_weight_str = f"{latest_weight:.4f}" if latest_weight is not None else "N/A"
+            
+            # 根据评分设置颜色
+            score_class = "score-high" if score >= 80 else "score-medium" if score >= 70 else "score-low"
+            
+            row = f'''<tr>
+                <td>{idx}</td>
+                <td>{code}</td>
+                <td>{html.escape(name)}</td>
+                <td class="{score_class}">{score:.2f}</td>
+                <td>{weight_change_rate_str}</td>
+                <td>{trend_slope_str}</td>
+                <td>{latest_weight_str}</td>
+            </tr>'''
+            hs300_rows.append(row)
+        
+        if not hs300_rows:
+            hs300_rows = ['<tr><td colspan="7" style="text-align: center; padding: 20px; color: #999;">未找到符合条件的股票</td></tr>']
+        
+        # 生成中小盘表格行
+        small_mid_rows = []
+        for idx, stock in enumerate(small_mid_stocks[:10], 1):
+            code = stock.get('code', 'N/A')
+            name = stock.get('name', 'N/A')
+            score = stock.get('score', 0)
+            weight_change_rate = stock.get('weight_change_rate')
+            trend_slope = stock.get('trend_slope')
+            latest_weight = stock.get('latest_weight')
+            
+            # 格式化数据
+            weight_change_rate_str = f"{weight_change_rate:.4f}" if weight_change_rate is not None else "N/A"
+            trend_slope_str = f"{trend_slope:.5f}" if trend_slope is not None else "N/A"
+            latest_weight_str = f"{latest_weight:.4f}" if latest_weight is not None else "N/A"
+            
+            # 根据评分设置颜色
+            score_class = "score-high" if score >= 80 else "score-medium" if score >= 70 else "score-low"
+            
+            row = f'''<tr>
+                <td>{idx}</td>
+                <td>{code}</td>
+                <td>{html.escape(name)}</td>
+                <td class="{score_class}">{score:.2f}</td>
+                <td>{weight_change_rate_str}</td>
+                <td>{trend_slope_str}</td>
+                <td>{latest_weight_str}</td>
+            </tr>'''
+            small_mid_rows.append(row)
+        
+        if not small_mid_rows:
+            small_mid_rows = ['<tr><td colspan="7" style="text-align: center; padding: 20px; color: #999;">未找到符合条件的股票</td></tr>']
+        
+        # 生成多因子打分策略表格行
+        top_stocks_rows = []
+        if stock_data_fundamental and len(stock_data_fundamental) > 0:
+            for idx, stock in enumerate(stock_data_fundamental[:10], 1):
+                code = stock.get('code', 'N/A')
+                name = stock.get('name', 'N/A')
+                score = stock.get('score', 0)
+                pe_ratio = stock.get('pe_ratio')
+                pb_ratio = stock.get('pb_ratio')
+                roe = stock.get('roe')
+                revenue_growth = stock.get('revenue_growth')
+                profit_growth = stock.get('profit_growth')
+                pct_change = stock.get('pct_change')
+                
+                # 构建关键亮点
+                highlight_comments = []
+                
+                # 优先级1：估值优势
+                if pe_ratio is not None and pe_ratio > 0:
+                    if pe_ratio < 15:
+                        highlight_comments.append('估值极低')
+                    elif pe_ratio < 25:
+                        highlight_comments.append('估值合理')
+                
+                if pb_ratio is not None and pb_ratio > 0:
+                    if pb_ratio < 1.5:
+                        highlight_comments.append('市净率低')
+                
+                # 优先级2：盈利能力
+                if roe is not None:
+                    if roe >= 20:
+                        highlight_comments.append('盈利优秀')
+                    elif roe >= 15:
+                        highlight_comments.append('盈利良好')
+                
+                # 优先级3：成长性
+                if revenue_growth is not None and revenue_growth > 20:
+                    highlight_comments.append('营收高增')
+                if profit_growth is not None and profit_growth > 30:
+                    highlight_comments.append('利润高增')
+                
+                # 优先级4：市场表现
+                if pct_change is not None:
+                    if pct_change > 5:
+                        highlight_comments.append('强势上涨')
+                    elif pct_change > 0:
+                        highlight_comments.append('上涨趋势')
+                
+                # 优先级5：综合评分
+                if score >= 85:
+                    highlight_comments.append('评分优秀')
+                elif score >= 75:
+                    highlight_comments.append('评分良好')
+                
+                # 如果没有任何亮点，使用默认评价
+                if not highlight_comments:
+                    highlight_comments.append('价值低估')
+                
+                # 只显示亮点文案（显示前2个最重要的亮点）
+                highlights_str = ' | '.join(highlight_comments[:2])
+                
+                # 生成表格行
+                row = f'''<tr>
+                    <td>{idx}</td>
+                    <td>{code}</td>
+                    <td>{html.escape(name)}</td>
+                    <td>{score:.2f}</td>
+                    <td>{highlights_str}</td>
+                </tr>'''
+                top_stocks_rows.append(row)
+        
+        if not top_stocks_rows:
+            top_stocks_rows = ['<tr><td colspan="5" style="text-align: center; padding: 20px; color: #999;">未找到符合条件的股票</td></tr>']
+        
+        return {
+            'hs300_table_rows': '\n'.join(hs300_rows),
+            'small_mid_table_rows': '\n'.join(small_mid_rows),
+            'top_stocks_table_rows': '\n'.join(top_stocks_rows),
+            'send_time': report_time,
+        }
 
     def _generate_template_data(self, stock_data: Optional[List[Dict]], body: str, total_stocks: int = 0) -> Dict:
         """

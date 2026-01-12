@@ -65,7 +65,7 @@ BOARD_TYPES = {
 DEFAULT_BOARD_TYPES = ['main']  # 可以修改为 ['main', 'gem'] 等
 
 # 多线程配置
-DEFAULT_MAX_WORKERS = 10  # 默认线程数
+DEFAULT_MAX_WORKERS = 3  # 默认线程数（内存受限环境建议 2-5，原值 10 可能导致 OOM）
 
 # Tushare配置
 TUSHARE_TOKEN = None  # 需要在环境变量或配置文件中设置，或通过代码设置
@@ -80,7 +80,8 @@ EMAIL_CONFIG = {
         'region': 'ap-guangzhou',  # 地域
         'from_email': None,  # 发件人邮箱（可从环境变量TENCENT_FROM_EMAIL获取）
         'from_name': 'A股选股程序',  # 发件人名称
-        'template_id': 40888,  # 邮件模板ID（如果使用模板发送）
+        'template_id': 40888,  # 邮件模板ID（如果使用模板发送，用于单策略）
+        'combined_template_id': 41280,  # 合并策略模板ID（用于combined策略）
         'use_template': True,  # 是否使用模板发送（True: 使用模板, False: 使用Simple方式）
     }
 }
