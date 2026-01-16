@@ -259,6 +259,56 @@ def _handle_execution_error(selector: StockSelector, error: Exception):
     raise
 
 
+def _handle_review_command(args):
+    """处理复盘命令"""
+    from data.fetcher import DataFetcher
+    from autoreview import ReviewHelper
+    
+    # 创建数据获取器
+    data_fetcher = DataFetcher(test_sources=False)
+    
+    # 创建复盘助手
+    review_helper = ReviewHelper(data_fetcher, data_fetcher.cache_manager)
+    
+    # 执行复盘
+    review_data = review_helper.review_single_date(
+        trade_date=args.review_date,
+        days=args.review_days,
+        strategy_name=getattr(args, 'strategy', None)
+    )
+    
+    if review_data is not None and not review_data.empty:
+        # 生成并打印报告
+        report = review_helper.generate_review_report(
+            review_data, args.review_date, args.review_days
+        )
+        print("\n" + report)
+    else:
+        print(f"未找到日期 {args.review_date} 的复盘数据")
+
+
+def _handle_fill_review_gaps():
+    """处理补齐复盘数据命令"""
+    from data.fetcher import DataFetcher
+    from autoreview import AutoReview
+    import config
+    
+    print("\n" + "=" * 60)
+    print("【补齐缺失复盘数据】")
+    print("=" * 60)
+    
+    # 创建数据获取器
+    data_fetcher = DataFetcher(test_sources=False)
+    
+    # 创建自动复盘管理器
+    auto_review = AutoReview(data_fetcher, data_fetcher.cache_manager)
+    
+    # 补齐缺失数据
+    auto_review.fill_missing_reviews(
+        days=config.AUTO_REVIEW_CONFIG.get('review_days', 10)
+    )
+
+
 def _create_strategy(args) -> BaseStrategy:
     """
     根据参数创建多因子策略实例（根据因子组合选择不同的策略实现）
@@ -341,6 +391,49 @@ def _print_startup_info(args, strategy: BaseStrategy):
         print("  强制刷新模式：将重新获取所有数据")
 
 
+def _save_recommendations(selector: StockSelector, strategy: BaseStrategy, results: pd.DataFrame):
+    """
+    保存推荐结果到数据库
+    Args:
+        selector: 选股器实例
+        strategy: 策略实例
+        results: 选股结果DataFrame
+    """
+    if results is None or results.empty:
+        return
+    
+    try:
+        from datetime import datetime
+        from data.utils import get_analysis_date
+        
+        # 获取推荐日期（使用分析日期，考虑交易时间）
+        analysis_date = get_analysis_date()
+        trade_date = analysis_date.strftime('%Y%m%d')
+        
+        strategy_name = strategy.get_strategy_name()
+        
+        # 确定策略类型
+        if strategy_name == 'ScoringStrategy':
+            strategy_type = 'fundamental'
+        elif strategy_name == 'IndexWeightStrategy':
+            strategy_type = 'index_weight'
+        else:
+            strategy_type = 'unknown'
+        
+        # 保存推荐结果
+        selector.strategy.data_fetcher.cache_manager.save_recommendations(
+            trade_date=trade_date,
+            strategy_name=strategy_name,
+            strategy_type=strategy_type,
+            results=results
+        )
+        
+        print(f"\n[推荐结果] 已保存到数据库（日期: {trade_date}, 策略: {strategy_name}, 股票数: {len(results)}）")
+        
+    except Exception as e:
+        print(f"[警告] 保存推荐结果失败: {e}")
+
+
 def _execute_selection(selector: StockSelector, strategy: BaseStrategy, params: dict) -> pd.DataFrame:
     """
     执行选股
@@ -393,11 +486,37 @@ def main():
                        help='指定邮件通知的收件人邮箱列表（可指定多个），如：--notify-to email1@example.com email2@example.com。如果不指定，则使用 config.py 中的 default_recipients')
     parser.add_argument('--notify-throttle', action='store_true', 
                        help='启用通知防骚扰：仅在交易日15:00之后发送，且每个邮箱每天最多发送一次')
+    
+    # 复盘功能参数
+    parser.add_argument('--review', action='store_true',
+                       help='启用复盘模式：查看指定日期的推荐结果复盘')
+    parser.add_argument('--review-date', type=str,
+                       help='复盘日期，格式：YYYYMMDD（与--review一起使用）')
+    parser.add_argument('--review-days', type=int, default=10,
+                       help='复盘天数（交易日数，默认10天）')
+    parser.add_argument('--fill-review-gaps', action='store_true',
+                       help='补齐缺失的复盘数据（不执行选股）')
+    parser.add_argument('--no-auto-review', action='store_true',
+                       help='禁用自动复盘（即使配置中启用了自动复盘）')
+    
     args = parser.parse_args()
 
     # 处理缓存信息查询
     if args.cache_info:
         print_cache_info(args.cache_info)
+        return
+    
+    # 处理复盘命令
+    if args.review:
+        if not args.review_date:
+            print("错误: 使用 --review 时必须指定 --review-date")
+            sys.exit(1)
+        _handle_review_command(args)
+        return
+    
+    # 处理补齐复盘数据命令
+    if args.fill_review_gaps:
+        _handle_fill_review_gaps()
         return
 
     # 前置检查：验证Tushare Token配置
@@ -450,6 +569,24 @@ def main():
             print("=" * 60)
             print_results(results_index_weight, selector_index_weight)
             
+            # 保存推荐结果
+            _save_recommendations(selector_fundamental, strategy_fundamental, results_fundamental)
+            _save_recommendations(selector_index_weight, strategy_index_weight, results_index_weight)
+            
+            # 自动复盘（如果启用）
+            if not args.no_auto_review and config.AUTO_REVIEW_CONFIG.get('enabled', True):
+                try:
+                    from autoreview import AutoReview
+                    auto_review = AutoReview(
+                        selector_fundamental.strategy.data_fetcher,
+                        selector_fundamental.strategy.data_fetcher.cache_manager
+                    )
+                    auto_review.auto_review_last_n_days(
+                        days=config.AUTO_REVIEW_CONFIG.get('review_days', 10)
+                    )
+                except Exception as e:
+                    print(f"[警告] 自动复盘失败: {e}")
+            
             # 发送通知（合并两个策略的结果）
             if args.notify:
                 _send_combined_notification(args, results_fundamental, results_index_weight, 
@@ -470,6 +607,23 @@ def main():
             
             # 输出结果
             print_results(results, selector)
+            
+            # 保存推荐结果
+            _save_recommendations(selector, strategy, results)
+            
+            # 自动复盘（如果启用）
+            if not args.no_auto_review and config.AUTO_REVIEW_CONFIG.get('enabled', True):
+                try:
+                    from autoreview import AutoReview
+                    auto_review = AutoReview(
+                        selector.strategy.data_fetcher,
+                        selector.strategy.data_fetcher.cache_manager
+                    )
+                    auto_review.auto_review_last_n_days(
+                        days=config.AUTO_REVIEW_CONFIG.get('review_days', 10)
+                    )
+                except Exception as e:
+                    print(f"[警告] 自动复盘失败: {e}")
             
             # 发送通知
             if args.notify:

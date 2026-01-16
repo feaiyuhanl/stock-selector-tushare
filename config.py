@@ -118,9 +118,9 @@ INDEX_WEIGHT_CONFIG = {
     
     # 评分权重
     'score_weights': {
-        'weight_change_rate': 0.50,    # 权重变化率权重
-        'trend_slope': 0.30,           # 趋势斜率权重
-        'weight_absolute': 0.20,        # 权重绝对值权重
+        'weight_change_rate': 0.30,    # 权重变化率权重（已降低）
+        'trend_slope': 0.50,           # 趋势斜率权重（中短期斜率，已提高）
+        'weight_absolute': 0.20,        # 权重绝对值权重（已降低）
     },
     
     # 多指数加分系数
@@ -128,5 +128,12 @@ INDEX_WEIGHT_CONFIG = {
     
     # 邮件通知模板ID（指数权重策略专用）
     'email_template_id': 41115,  # 指数权重策略的邮件模板ID
+}
+
+# 自动复盘配置
+AUTO_REVIEW_CONFIG = {
+    'enabled': True,              # 是否启用自动复盘（每次选股完成后自动复盘前N个交易日）
+    'review_days': 10,            # 复盘天数（默认10个交易日）
+    'auto_update': True,          # 是否自动补齐缺失数据
 }
 

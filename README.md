@@ -17,6 +17,7 @@
 - **稳定数据源**：基于tushare，提供稳定的数据源，避免限流问题
 - **智能容错**：自动处理缺失指标，根据数据可用性动态调整权重
 - **通知功能**：支持腾讯云邮件推送和企业微信通知，程序执行完成后自动发送结果通知
+- **复盘功能**：自动跟踪推荐结果的表现，计算评分，支持手动复盘和补齐缺失数据（详见[复盘功能文档](docs/review.md)）
 
 ## 项目结构
 
@@ -48,7 +49,14 @@ stock-selector-tushare/
 │   ├── configuration.md      # 参数配置说明
 │   ├── cache.md              # 缓存机制说明
 │   ├── scoring.md            # 评分指标说明
+│   ├── review.md             # 复盘功能说明
 │   └── tushare.md            # Tushare积分说明
+│
+├── autoreview/               # 自动复盘模块
+│   ├── __init__.py
+│   ├── auto_review.py        # 自动复盘核心逻辑
+│   ├── review_cache.py       # 复盘数据缓存管理
+│   └── review_helper.py      # 复盘工具函数
 │
 └── cache/                    # 缓存目录（自动创建）
     └── stock_cache.db         # SQLite数据库文件
@@ -128,6 +136,14 @@ python stock_selector.py --refresh --top-n 10 --board main
   - 综合评分计算
   - 缺失指标处理
   - 分数范围与等级
+
+- **[复盘功能文档](docs/review.md)** - 复盘功能说明
+  - 功能概述
+  - 评分规则
+  - 数据库表结构
+  - 命令行使用
+  - 配置说明
+  - 使用示例
 
 - **[Tushare积分文档](docs/tushare.md)** - Tushare积分说明
   - 积分等级对照表

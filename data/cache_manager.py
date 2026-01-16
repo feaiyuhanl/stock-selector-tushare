@@ -8,6 +8,7 @@ from .cache_base import CacheBase
 from .fundamental_cache import FundamentalCache
 from .kline_cache import KlineCache
 from .index_cache import IndexCache
+from .recommendation_cache import RecommendationCache
 
 
 class CacheManager(CacheBase):
@@ -26,6 +27,7 @@ class CacheManager(CacheBase):
         self.fundamental_cache = FundamentalCache(self)
         self.kline_cache = KlineCache(self)
         self.index_cache = IndexCache(self)
+        self.recommendation_cache = RecommendationCache(self)
     
     # ========== 基本面和财务数据相关方法 ==========
     
@@ -206,6 +208,65 @@ class CacheManager(CacheBase):
         """
         return self.index_cache.calculate_index_weight_factors(
             index_code, con_code, lookback_days
+        )
+    
+    # ========== 策略推荐结果相关方法 ==========
+    
+    def save_recommendations(
+        self,
+        trade_date: str,
+        strategy_name: str,
+        strategy_type: str,
+        results: pd.DataFrame
+    ):
+        """
+        保存策略推荐结果到缓存
+        Args:
+            trade_date: 推荐日期，格式：YYYYMMDD
+            strategy_name: 策略名称
+            strategy_type: 策略类型
+            results: 推荐结果DataFrame
+        """
+        self.recommendation_cache.save_recommendations(
+            trade_date, strategy_name, strategy_type, results
+        )
+    
+    def get_recommendations(
+        self,
+        trade_date: str,
+        strategy_name: str = None,
+        strategy_type: str = None
+    ) -> Optional[pd.DataFrame]:
+        """
+        获取策略推荐结果
+        Args:
+            trade_date: 推荐日期，格式：YYYYMMDD
+            strategy_name: 策略名称，如果为None则返回所有策略
+            strategy_type: 策略类型，如果为None则返回所有类型
+        Returns:
+            推荐结果DataFrame
+        """
+        return self.recommendation_cache.get_recommendations(
+            trade_date, strategy_name, strategy_type
+        )
+    
+    def get_stock_recommendations(
+        self,
+        stock_code: str,
+        start_date: str = None,
+        end_date: str = None
+    ) -> Optional[pd.DataFrame]:
+        """
+        获取某股票的历史推荐记录
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期，格式：YYYYMMDD
+            end_date: 结束日期，格式：YYYYMMDD
+        Returns:
+            推荐记录DataFrame
+        """
+        return self.recommendation_cache.get_stock_recommendations(
+            stock_code, start_date, end_date
         )
     
     # ========== 工具方法（需要访问多个模块） ==========

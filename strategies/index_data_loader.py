@@ -2,6 +2,7 @@
 指数权重策略数据加载器：确保指数权重数据已加载
 """
 from datetime import datetime, timedelta
+from data.utils import get_analysis_date
 
 
 class IndexDataLoader:
@@ -26,8 +27,14 @@ class IndexDataLoader:
     def ensure_index_weight_data(self):
         """
         确保指数权重数据已加载（如果缺失则自动获取）
+        智能判断是否需要刷新：使用 get_analysis_date() 来确定应该使用的交易日，
+        并检查缓存中是否有该交易日的数据（类似 K线数据的处理方式）
         """
         print("  检查指数权重数据缓存...")
+        
+        # 获取应该使用的分析日期（考虑交易时间、节假日等）
+        analysis_date = get_analysis_date()
+        analysis_date_str = analysis_date.strftime('%Y%m%d')
         
         # 计算需要获取的日期范围（多获取一些天数，确保有足够的历史数据）
         end_date = datetime.now().strftime('%Y%m%d')
@@ -62,9 +69,9 @@ class IndexDataLoader:
                 # 检查最新数据日期，判断是否需要更新
                 if dates.size > 0:
                     latest_date = max(dates)
-                    today = datetime.now().strftime('%Y%m%d')
-                    # 如果最新数据日期不是今天，且数据点不足理想数量，则更新
-                    needs_update = latest_date < today and date_count < ideal_required
+                    # 使用分析日期来判断是否需要更新（而不是简单的 today）
+                    # 如果缓存中的最新日期早于应该使用的分析日期，则需要更新
+                    needs_update = latest_date < analysis_date_str
                 else:
                     latest_date = None
                     needs_update = True
@@ -76,7 +83,7 @@ class IndexDataLoader:
                 elif needs_update:
                     # 数据基本足够但需要更新到最新日期
                     indices_to_fetch.append(index_code)
-                    print(f"    {self.index_names.get(index_code, index_code)}: 数据可更新 ({date_count} 个交易日，最新: {latest_date})，将更新到最新日期")
+                    print(f"    {self.index_names.get(index_code, index_code)}: 数据可更新 ({date_count} 个交易日，最新: {latest_date}，需要: {analysis_date_str})，将更新到最新日期")
                 else:
                     # 数据完整且最新
                     print(f"    {self.index_names.get(index_code, index_code)}: 数据完整 ({date_count} 个交易日，最新: {latest_date})")

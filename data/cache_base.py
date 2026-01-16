@@ -162,6 +162,65 @@ class CacheBase:
                 )
             ''')
 
+            # 创建策略推荐结果表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS strategy_recommendations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_date TEXT NOT NULL,              -- 推荐日期，格式：YYYYMMDD
+                    strategy_name TEXT NOT NULL,            -- 策略名称，如：'ScoringStrategy', 'IndexWeightStrategy'
+                    strategy_type TEXT NOT NULL,            -- 策略类型，如：'fundamental', 'index_weight'
+                    stock_code TEXT NOT NULL,               -- 股票代码，6位数字
+                    stock_name TEXT,                        -- 股票名称
+                    rank INTEGER NOT NULL,                  -- 排名（从1开始）
+                    score REAL,                             -- 综合得分
+                    metrics_json TEXT,                      -- JSON格式的策略特定指标
+                    category TEXT,                          -- 分类标记（如IndexWeightStrategy的'沪深300权重股'等）
+                    created_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, strategy_name, stock_code)
+                )
+            ''')
+
+            # 创建复盘汇总表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS review_summary (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recommendation_date TEXT NOT NULL,      -- 推荐日期，格式：YYYYMMDD
+                    strategy_name TEXT NOT NULL,            -- 策略名称
+                    strategy_type TEXT NOT NULL,            -- 策略类型
+                    stock_code TEXT NOT NULL,               -- 股票代码
+                    stock_name TEXT,                        -- 股票名称
+                    recommendation_price REAL,              -- 推荐当天的收盘价
+                    rank INTEGER,                           -- 推荐时的排名
+                    -- 第1-10交易日的收盘价和评分
+                    day1_price REAL,
+                    day1_score REAL,
+                    day2_price REAL,
+                    day2_score REAL,
+                    day3_price REAL,
+                    day3_score REAL,
+                    day4_price REAL,
+                    day4_score REAL,
+                    day5_price REAL,
+                    day5_score REAL,
+                    day6_price REAL,
+                    day6_score REAL,
+                    day7_price REAL,
+                    day7_score REAL,
+                    day8_price REAL,
+                    day8_score REAL,
+                    day9_price REAL,
+                    day9_score REAL,
+                    day10_price REAL,
+                    day10_score REAL,
+                    -- 统计信息
+                    average_score REAL,                     -- 平均分（10个交易日的平均）
+                    total_score REAL,                       -- 总评分（第10个交易日的评分）
+                    valid_days INTEGER,                     -- 有效交易日数（有数据的交易日数）
+                    last_update_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(recommendation_date, strategy_name, stock_code)
+                )
+            ''')
+
             # 创建索引以提高查询性能
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_fundamental_code ON fundamental_data(code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_code ON financial_data(code)')
@@ -172,6 +231,16 @@ class CacheBase:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_weight_code_date ON index_weight_data(index_code, trade_date)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_weight_con_code ON index_weight_data(con_code)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_weight_date ON index_weight_data(trade_date)')
+            
+            # 策略推荐结果表索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_recommendations_date ON strategy_recommendations(trade_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_recommendations_strategy ON strategy_recommendations(strategy_name, strategy_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_strategy_recommendations_code ON strategy_recommendations(stock_code)')
+            
+            # 复盘汇总表索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_review_summary_date ON review_summary(recommendation_date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_review_summary_strategy ON review_summary(strategy_name, strategy_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_review_summary_code ON review_summary(stock_code)')
 
             conn.commit()
 
