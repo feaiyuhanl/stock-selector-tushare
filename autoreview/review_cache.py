@@ -89,9 +89,8 @@ class ReviewCache:
                      day10_price, day10_score,
                      average_score, total_score, valid_days, last_update_time)
                     VALUES (?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?)
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?)
                 ''', (
                     recommendation_date, strategy_name, strategy_type, stock_code, stock_name,
                     recommendation_price, rank,

@@ -113,13 +113,47 @@ class KlineCache:
                         yesterday = yesterday - timedelta(days=1)
                     return latest_date >= yesterday
                 else:
-                    # 可以使用今天的数据（收盘后）
-                    # 同样允许7天的容差（考虑假期）
+                    # 可以使用今天的数据（收盘后，15:00之后）
+                    # 收盘后，只有当缓存中有今天的数据时，才认为有最新数据
+                    # 如果缓存中只有昨天的数据，需要刷新获取今天的数据
                     days_diff = (today - latest_date).days
-                    if days_diff <= 1:
+                    
+                    # 如果缓存中的最新日期就是今天，认为有最新数据
+                    if days_diff == 0:
                         return True
+                    
+                    # 如果缓存中的最新日期是昨天（days_diff == 1），需要判断今天是否是交易日
+                    # 如果是交易日，应该返回 False 触发刷新
+                    # 如果不是交易日（假期），可以返回 True 使用最近的数据
+                    if days_diff == 1:
+                        # 检查今天是否是交易日
+                        # 如果是周末，肯定不是交易日，可以使用昨天的数据
+                        if weekday >= 5:
+                            return True
+                        
+                        # 如果是工作日，使用交易日历判断今天是否是交易日
+                        # 如果今天是交易日，返回 False 触发刷新
+                        # 如果今天不是交易日（假期），返回 True 使用最近的数据
+                        today_str = today.strftime('%Y%m%d')
+                        is_trading = self.base.is_trading_day(today_str)
+                        
+                        if is_trading is True:
+                            # 今天是交易日，但缓存中只有昨天的数据，需要刷新
+                            return False
+                        elif is_trading is False:
+                            # 今天不是交易日（假期），可以使用昨天的数据
+                            return True
+                        else:
+                            # 交易日历中没有今天的数据，保守策略：返回 False 触发刷新
+                            # 这样可以确保在交易日收盘后能及时获取最新数据
+                            return False
+                    
                     # 如果超过1天但在7天内，可能是假期，仍然认为有效
-                    return days_diff <= 7
+                    if days_diff <= 7:
+                        return True
+                    
+                    # 超过7天，认为缓存过期
+                    return False
 
         except Exception as e:
             print(f"检查K线数据有效性失败 ({symbol}): {e}")
