@@ -132,48 +132,54 @@ class ReviewCache:
             strategy_type: 策略类型，如果为None则返回所有类型
             stock_code: 股票代码，如果为None则返回所有股票
         Returns:
-            复盘汇总DataFrame
+            复盘汇总DataFrame（包含 category 字段，如果 strategy_recommendations 表中有的话）
         """
         try:
             with sqlite3.connect(self.base.db_path) as conn:
+                # 关联 strategy_recommendations 表以获取 category 字段
                 query = '''
-                    SELECT recommendation_date, strategy_name, strategy_type, stock_code, stock_name,
-                           recommendation_price, rank,
-                           day1_price, day1_score,
-                           day2_price, day2_score,
-                           day3_price, day3_score,
-                           day4_price, day4_score,
-                           day5_price, day5_score,
-                           day6_price, day6_score,
-                           day7_price, day7_score,
-                           day8_price, day8_score,
-                           day9_price, day9_score,
-                           day10_price, day10_score,
-                           average_score, total_score, valid_days, last_update_time
-                    FROM review_summary
+                    SELECT rs.recommendation_date, rs.strategy_name, rs.strategy_type, rs.stock_code, rs.stock_name,
+                           rs.recommendation_price, rs.rank,
+                           rs.day1_price, rs.day1_score,
+                           rs.day2_price, rs.day2_score,
+                           rs.day3_price, rs.day3_score,
+                           rs.day4_price, rs.day4_score,
+                           rs.day5_price, rs.day5_score,
+                           rs.day6_price, rs.day6_score,
+                           rs.day7_price, rs.day7_score,
+                           rs.day8_price, rs.day8_score,
+                           rs.day9_price, rs.day9_score,
+                           rs.day10_price, rs.day10_score,
+                           rs.average_score, rs.total_score, rs.valid_days, rs.last_update_time,
+                           sr.category
+                    FROM review_summary rs
+                    LEFT JOIN strategy_recommendations sr
+                        ON rs.recommendation_date = sr.trade_date
+                        AND rs.strategy_name = sr.strategy_name
+                        AND rs.stock_code = sr.stock_code
                     WHERE 1=1
                 '''
                 params = []
                 
                 if recommendation_date:
                     recommendation_date = recommendation_date.replace('-', '')
-                    query += ' AND recommendation_date = ?'
+                    query += ' AND rs.recommendation_date = ?'
                     params.append(recommendation_date)
                 
                 if strategy_name:
-                    query += ' AND strategy_name = ?'
+                    query += ' AND rs.strategy_name = ?'
                     params.append(strategy_name)
                 
                 if strategy_type:
-                    query += ' AND strategy_type = ?'
+                    query += ' AND rs.strategy_type = ?'
                     params.append(strategy_type)
                 
                 if stock_code:
                     stock_code = self.base._normalize_stock_code(stock_code)
-                    query += ' AND stock_code = ?'
+                    query += ' AND rs.stock_code = ?'
                     params.append(stock_code)
                 
-                query += ' ORDER BY recommendation_date DESC, strategy_name, rank'
+                query += ' ORDER BY rs.recommendation_date DESC, rs.strategy_name, rs.rank'
                 
                 df = pd.read_sql_query(query, conn, params=params)
                 
