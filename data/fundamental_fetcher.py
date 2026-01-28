@@ -2,6 +2,7 @@
 基本面和财务数据获取模块
 """
 import pandas as pd
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 from .utils import get_analysis_date
@@ -26,8 +27,39 @@ class FundamentalFetcher:
         stock_code = str(stock_code)
         clean_code = self.base._format_stock_code(stock_code)
         
+        # 检查缓存数据的更新时间，如果超过一周未更新，自动强制刷新
+        force_refresh_fundamental = self.base.force_refresh
+        if not force_refresh_fundamental:
+            # 检查缓存数据的更新时间
+            try:
+                with sqlite3.connect(self.base.cache_manager.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT update_time FROM fundamental_data
+                        WHERE code = ?
+                        ORDER BY update_time DESC LIMIT 1
+                    ''', (clean_code,))
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        update_time_str = result[0]
+                        try:
+                            update_time = datetime.strptime(update_time_str, '%Y-%m-%d %H:%M:%S')
+                        except:
+                            try:
+                                update_time = datetime.strptime(update_time_str, '%Y-%m-%d')
+                            except:
+                                update_time = None
+                        
+                        if update_time:
+                            days_diff = (datetime.now() - update_time).days
+                            # 如果超过7天未更新，自动强制刷新
+                            if days_diff > 7:
+                                force_refresh_fundamental = True
+            except Exception:
+                pass  # 如果检查失败，使用默认的 force_refresh
+        
         # 先尝试从缓存读取
-        cached_data = self.base.cache_manager.get_fundamental(clean_code, self.base.force_refresh)
+        cached_data = self.base.cache_manager.get_fundamental(clean_code, force_refresh_fundamental)
         if cached_data is not None:
             cached_data.pop('code', None)
             cached_data.pop('update_time', None)

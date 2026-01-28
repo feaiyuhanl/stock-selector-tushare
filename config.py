@@ -1,6 +1,10 @@
 """
 配置文件：定义评分权重和参数
 """
+import os
+
+# 缓存目录（绝对路径，与 CWD 无关，确保选股、复盘、飞书同步读写同一 stock_cache.db）
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache')
 
 # 各维度权重配置（总和应为1.0）
 WEIGHT_CONFIG = {
@@ -130,10 +134,20 @@ INDEX_WEIGHT_CONFIG = {
     'email_template_id': 41115,  # 指数权重策略的邮件模板ID
 }
 
-# 自动复盘配置
+# 自动复盘配置（复盘、飞书同步、复盘天数、起始日期、自动补齐均由此处控制，无 CLI 覆盖）
 AUTO_REVIEW_CONFIG = {
-    'enabled': True,              # 是否启用自动复盘（每次选股完成后自动复盘前N个交易日）
-    'review_days': 10,            # 复盘天数（默认10个交易日）
-    'auto_update': True,          # 是否自动补齐缺失数据
+    'enabled': True,              # 是否启用自动复盘
+    'review_days': 10,            # 复盘天数（交易日数）
+    'review_start_date': None,    # 复盘起始日期 YYYYMMDD，只处理该日期及以后；None 表示不限制
+    'auto_update': True,          # 自动补齐缺失（前 N 日循环中只写缺失条，等价于补齐）
+}
+
+# 飞书电子表格同步配置（复盘结果同步到飞书）
+# 选股+复盘完成后自动同步到飞书；enabled=False 可关闭。环境变量可覆盖：FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_FOLDER_TOKEN
+FEISHU_SHEETS_CONFIG = {
+    'enabled': True,              # 是否同步复盘结果到飞书电子表格（默认 True，与「复盘后自动同步」一致）
+    'folder_token': None,         # 目标文件夹 token（不要求 fld 开头）
+    'app_id': None,
+    'app_secret': None,
 }
 

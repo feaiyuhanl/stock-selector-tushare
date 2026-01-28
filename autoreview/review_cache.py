@@ -26,30 +26,32 @@ class ReviewCache:
         strategy_type: str,
         stock_code: str,
         stock_name: str,
-        recommendation_price: float,
+        recommendation_price: Optional[float],
         rank: int,
-        daily_prices: Dict[str, float],
-        daily_scores: Dict[str, float],
-        average_score: float,
-        total_score: float,
-        valid_days: int
+        daily_prices: Dict[str, float] = None,
+        daily_scores: Dict[str, float] = None,
+        average_score: float = None,
+        total_score: float = None,
+        valid_days: int = 0
     ):
         """
-        保存或更新复盘汇总记录
+        保存或更新复盘汇总记录。支持占位：recommendation_price 为 None 时写 NULL；daily_prices/daily_scores 为空或 average_score/total_score 为 None 时，day1–day10、average_score、total_score 写 NULL，valid_days=0。
         Args:
             recommendation_date: 推荐日期，格式：YYYYMMDD
             strategy_name: 策略名称
             strategy_type: 策略类型
             stock_code: 股票代码
             stock_name: 股票名称
-            recommendation_price: 推荐当天的收盘价
+            recommendation_price: 推荐当天的收盘价，None 时写 NULL（占位且无 K 线数据时）
             rank: 推荐时的排名
-            daily_prices: {日期: 收盘价} 字典，日期格式：YYYYMMDD
-            daily_scores: {日期: 评分} 字典，日期格式：YYYYMMDD
-            average_score: 平均分
-            total_score: 总评分
-            valid_days: 有效交易日数
+            daily_prices: {日期: 收盘价} 字典，空或 None 时 day1–day10 为 NULL
+            daily_scores: {日期: 评分} 字典，空或 None 时 day1–day10 为 NULL
+            average_score: 平均分，None 时写 NULL
+            total_score: 总评分，None 时写 NULL
+            valid_days: 有效交易日数，占位时 0
         """
+        daily_prices = daily_prices or {}
+        daily_scores = daily_scores or {}
         # 标准化日期格式
         recommendation_date = recommendation_date.replace('-', '')
         stock_code = self.base._normalize_stock_code(stock_code)
@@ -210,4 +212,80 @@ class ReviewCache:
                 return count > 0
         except Exception as e:
             return False
+    
+    def get_existing_review(
+        self,
+        recommendation_date: str,
+        strategy_name: str,
+        stock_code: str
+    ) -> Optional[Dict]:
+        """
+        获取已存在的复盘记录
+        Args:
+            recommendation_date: 推荐日期，格式：YYYYMMDD
+            strategy_name: 策略名称
+            stock_code: 股票代码
+        Returns:
+            如果存在则返回记录字典，否则返回None
+        """
+        recommendation_date = recommendation_date.replace('-', '')
+        stock_code = self.base._normalize_stock_code(stock_code)
+        
+        try:
+            with sqlite3.connect(self.base.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT recommendation_date, strategy_name, strategy_type, stock_code, stock_name,
+                           recommendation_price, rank,
+                           day1_price, day1_score,
+                           day2_price, day2_score,
+                           day3_price, day3_score,
+                           day4_price, day4_score,
+                           day5_price, day5_score,
+                           day6_price, day6_score,
+                           day7_price, day7_score,
+                           day8_price, day8_score,
+                           day9_price, day9_score,
+                           day10_price, day10_score,
+                           average_score, total_score, valid_days
+                    FROM review_summary
+                    WHERE recommendation_date = ? AND strategy_name = ? AND stock_code = ?
+                ''', (recommendation_date, strategy_name, stock_code))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'recommendation_date': row[0],
+                        'strategy_name': row[1],
+                        'strategy_type': row[2],
+                        'stock_code': row[3],
+                        'stock_name': row[4],
+                        'recommendation_price': row[5],
+                        'rank': row[6],
+                        'day1_price': row[7],
+                        'day1_score': row[8],
+                        'day2_price': row[9],
+                        'day2_score': row[10],
+                        'day3_price': row[11],
+                        'day3_score': row[12],
+                        'day4_price': row[13],
+                        'day4_score': row[14],
+                        'day5_price': row[15],
+                        'day5_score': row[16],
+                        'day6_price': row[17],
+                        'day6_score': row[18],
+                        'day7_price': row[19],
+                        'day7_score': row[20],
+                        'day8_price': row[21],
+                        'day8_score': row[22],
+                        'day9_price': row[23],
+                        'day9_score': row[24],
+                        'day10_price': row[25],
+                        'day10_score': row[26],
+                        'average_score': row[27],
+                        'total_score': row[28],
+                        'valid_days': row[29]
+                    }
+                return None
+        except Exception as e:
+            return None
 

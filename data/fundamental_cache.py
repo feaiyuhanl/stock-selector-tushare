@@ -39,7 +39,7 @@ class FundamentalCache:
             },
             'financial': {
                 'table': 'financial_data',
-                'fields': ['roe'],
+                'fields': ['roe', 'revenue_growth', 'profit_growth'],
                 'memory_cache_attr': '_financial_cache_memory',
                 'lock_attr': '_financial_cache_lock',
                 'db_lock_key': 'financial',

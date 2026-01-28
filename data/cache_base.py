@@ -17,8 +17,15 @@ class CacheBase:
         """
         初始化缓存管理器基础功能
         Args:
-            cache_dir: 缓存目录
+            cache_dir: 缓存目录；"cache" 或未传入时使用 config.CACHE_DIR 或项目根/cache（绝对路径，与 CWD 无关）
         """
+        if not cache_dir or cache_dir == "cache":
+            import config
+            _abs = getattr(config, 'CACHE_DIR', None)
+            if not _abs:
+                _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                _abs = os.path.join(_root, 'cache')
+            cache_dir = _abs
         self.cache_dir = cache_dir
         self._ensure_cache_dir()
 
@@ -103,10 +110,23 @@ class CacheBase:
                 CREATE TABLE IF NOT EXISTS financial_data (
                     code TEXT PRIMARY KEY,
                     roe REAL,
+                    revenue_growth REAL,
+                    profit_growth REAL,
                     update_time TEXT NOT NULL,
                     created_time TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # 为现有表添加新字段（如果表已存在但缺少这些字段）
+            try:
+                cursor.execute('ALTER TABLE financial_data ADD COLUMN revenue_growth REAL')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在，忽略错误
+            
+            try:
+                cursor.execute('ALTER TABLE financial_data ADD COLUMN profit_growth REAL')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在，忽略错误
 
             # 创建股票列表表
             cursor.execute('''

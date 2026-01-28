@@ -23,6 +23,21 @@ class BaseStrategy(ABC):
         else:
             self.data_fetcher = data_fetcher
     
+    @property
+    def strategy_type(self) -> str:
+        """
+        获取策略类型
+        Returns:
+            策略类型：'fundamental' 或 'index_weight'
+        """
+        strategy_name = self.get_strategy_name()
+        if strategy_name == 'ScoringStrategy':
+            return 'fundamental'
+        elif strategy_name == 'IndexWeightStrategy':
+            return 'index_weight'
+        else:
+            return 'unknown'
+    
     @abstractmethod
     def evaluate_stock(self, stock_code: str, stock_name: str = "") -> Optional[Dict]:
         """
@@ -36,12 +51,17 @@ class BaseStrategy(ABC):
         pass
     
     @abstractmethod
-    def select_top_stocks(self, stock_codes: List[str] = None, top_n: int = 20) -> pd.DataFrame:
+    def select_top_stocks(self, stock_codes: List[str] = None, top_n: int = 20,
+                         board_types: List[str] = None, max_workers: int = None,
+                         **kwargs) -> pd.DataFrame:
         """
-        选择TOP股票
+        选择TOP股票 - 统一接口，支持额外参数
         Args:
             stock_codes: 股票代码列表，如果为None则评估所有股票
             top_n: 返回前N只股票
+            board_types: 板块类型列表，None表示使用默认配置
+            max_workers: 最大线程数，None表示使用默认配置
+            **kwargs: 额外参数（不同策略可能有不同的额外参数）
         Returns:
             TOP股票DataFrame
         """

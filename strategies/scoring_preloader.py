@@ -59,6 +59,20 @@ class ScoringPreloader:
                 outdated_stocks = [code for code, status in cache_status.items() if status == 'outdated']
                 missing_stocks = [code for code, status in cache_status.items() if status == 'missing']
                 
+                # 收盘后强制刷新：即使缓存判断为"最新"，收盘后也应该重新获取最新价格
+                # 这是一个兜底保障，确保获取收盘后的最新价格
+                from datetime import datetime, time
+                from data.utils import AFTERNOON_END
+                current_time = datetime.now().time()
+                weekday = datetime.now().weekday()
+                is_after_market_close = (weekday < 5 and current_time >= AFTERNOON_END)
+                
+                if is_after_market_close and latest_stocks:
+                    # 收盘后，将"最新"的股票也标记为需要更新，确保获取收盘后的最新价格
+                    print(f"  [收盘后刷新] 收盘后检测到 {len(latest_stocks)} 只股票缓存为最新，强制刷新以确保获取收盘价")
+                    outdated_stocks.extend(latest_stocks)
+                    latest_stocks = []
+                
                 latest_count = len(latest_stocks)
                 outdated_count = len(outdated_stocks)
                 missing_count = len(missing_stocks)

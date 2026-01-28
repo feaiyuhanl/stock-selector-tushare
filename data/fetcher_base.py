@@ -389,8 +389,15 @@ class FetcherBase:
                 if cached_cal is not None and not cached_cal.empty:
                     # 检查缓存是否包含需要的日期范围
                     need_fetch = False
+                    cached_cal['cal_date'] = cached_cal['cal_date'].astype(str)
+                    
+                    # 检查今天的数据是否存在（即使没有指定日期范围）
+                    today_str = datetime.now().strftime('%Y%m%d')
+                    if today_str not in cached_cal['cal_date'].values:
+                        # 缓存中没有今天的数据，需要获取
+                        need_fetch = True
+                    
                     if start_date or end_date:
-                        cached_cal['cal_date'] = cached_cal['cal_date'].astype(str)
                         if start_date and cached_cal['cal_date'].min() > start_date:
                             # 缓存中没有开始日期之前的数据，需要获取
                             need_fetch = True

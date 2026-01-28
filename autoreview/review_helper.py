@@ -82,6 +82,7 @@ class ReviewHelper:
     def get_stock_close_price(self, stock_code: str, trade_date: str) -> Optional[float]:
         """
         获取股票在指定日期的收盘价
+        若缓存无该日 K 线，会尝试向 tushare 拉取该日数据并写入缓存后再取 close。
         Args:
             stock_code: 股票代码
             trade_date: 交易日期，格式：YYYYMMDD
@@ -89,19 +90,47 @@ class ReviewHelper:
             收盘价，如果不存在则返回None
         """
         try:
-            stock_code = self.data_fetcher._format_stock_code(stock_code)
+            clean_code = self.data_fetcher._format_stock_code(stock_code)
             trade_date_str = trade_date.replace('-', '')
             trade_date_obj = datetime.strptime(trade_date_str, '%Y%m%d')
             date_str = trade_date_obj.strftime('%Y-%m-%d')
             
-            # 从K线数据获取
-            kline_data = self.cache_manager.get_kline(stock_code, 'stock', 'daily', force_refresh=False)
+            # 1) 先从缓存取
+            kline_data = self.cache_manager.get_kline(clean_code, 'stock', 'daily', force_refresh=False)
             if kline_data is not None and not kline_data.empty:
                 kline_data['date'] = pd.to_datetime(kline_data['date'])
                 target_date = pd.to_datetime(date_str)
                 match = kline_data[kline_data['date'].dt.date == target_date.date()]
                 if not match.empty:
                     return float(match.iloc[0]['close'])
+            
+            # 2) 缓存未命中：拉取该日 K 线并写入缓存后取 close
+            _get_ts = getattr(self.data_fetcher, '_get_ts_code', None)
+            ts_code = _get_ts(clean_code) if callable(_get_ts) else None
+            pro = getattr(self.data_fetcher, 'pro', None)
+            _retry = getattr(self.data_fetcher, '_retry_request', None)
+            if ts_code and pro and callable(_retry):
+                def _fetch():
+                    return pro.daily(ts_code=ts_code, start_date=trade_date_str, end_date=trade_date_str)
+                raw = _retry(_fetch, max_retries=2, timeout=15)
+                if raw is not None and not raw.empty:
+                    row = raw.iloc[0]
+                    close = float(row['close'])
+                    # 写入缓存，格式与 kline_cache 一致：date, open, high, low, close, volume, amount
+                    one = pd.DataFrame([{
+                        'date': pd.to_datetime(str(row['trade_date']), format='%Y%m%d'),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': close,
+                        'volume': float(row.get('vol', 0) or 0),
+                        'amount': float(row.get('amount', 0) or 0),
+                    }])
+                    try:
+                        self.cache_manager.save_kline(clean_code, one, 'stock', 'daily', incremental=True)
+                    except Exception:
+                        pass
+                    return close
             
             return None
             

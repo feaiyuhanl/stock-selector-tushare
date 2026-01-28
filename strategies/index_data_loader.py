@@ -42,7 +42,8 @@ class IndexDataLoader:
         start_date = (datetime.now() - timedelta(days=self.lookback_days * 2)).strftime('%Y%m%d')
         
         # 检查每个指数的数据完整性
-        indices_to_fetch = []
+        indices_to_fetch = []  # 数据不足，需要获取的指数
+        indices_to_update = []  # 数据足够但需要更新到最新日期的指数
         for index_code in self.index_codes:
             # 检查是否有最新数据
             latest_data = self.data_fetcher.cache_manager.get_index_weight(
@@ -82,22 +83,37 @@ class IndexDataLoader:
                     print(f"    {self.index_names.get(index_code, index_code)}: 数据不足 ({date_count} 个交易日，需要至少 {min_required} 个)，需要获取")
                 elif needs_update:
                     # 数据基本足够但需要更新到最新日期
-                    indices_to_fetch.append(index_code)
+                    indices_to_update.append(index_code)
                     print(f"    {self.index_names.get(index_code, index_code)}: 数据可更新 ({date_count} 个交易日，最新: {latest_date}，需要: {analysis_date_str})，将更新到最新日期")
                 else:
                     # 数据完整且最新
                     print(f"    {self.index_names.get(index_code, index_code)}: 数据完整 ({date_count} 个交易日，最新: {latest_date})")
         
-        # 批量获取缺失的数据
+        # 批量获取缺失的数据（数据不足的情况）
         if indices_to_fetch:
-            print(f"\n  获取 {len(indices_to_fetch)} 个指数的权重数据...")
+            print(f"\n  获取 {len(indices_to_fetch)} 个指数的权重数据（数据不足）...")
             print(f"  日期范围: {start_date} 至 {end_date}")
             self.data_fetcher.batch_get_index_weight(
                 index_codes=indices_to_fetch,
                 start_date=start_date,
                 end_date=end_date,
-                force_refresh=self.force_refresh,
+                force_refresh=self.force_refresh,  # 使用配置的 force_refresh 参数
                 show_progress=True
             )
             print("  ✓ 指数权重数据获取完成")
+        
+        # 批量更新需要更新的数据（数据足够但需要更新到最新日期的情况）
+        # 使用智能检查，不需要强制刷新（类似K线数据的处理方式）
+        if indices_to_update:
+            print(f"\n  更新 {len(indices_to_update)} 个指数的权重数据到最新日期...")
+            print(f"  日期范围: {start_date} 至 {end_date}")
+            # 使用智能检查，不需要强制刷新（index_fetcher 会自动检查是否需要更新）
+            self.data_fetcher.batch_get_index_weight(
+                index_codes=indices_to_update,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=self.force_refresh,  # 使用配置的 force_refresh 参数，智能检查会自动处理
+                show_progress=True
+            )
+            print("  ✓ 指数权重数据更新完成")
 

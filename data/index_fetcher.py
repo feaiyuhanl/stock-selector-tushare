@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from .utils import get_analysis_date
 
 
 class IndexFetcher:
@@ -50,8 +51,8 @@ class IndexFetcher:
         if end_date:
             end_date = end_date.replace('-', '')
         
-        # 先尝试从缓存获取
-        if not force_refresh:
+        # 智能检查：如果最新交易日数据已存在，直接返回，无需下载（类似K线数据的处理方式）
+        if not force_refresh and self.base.cache_manager.has_latest_trading_day_data_index_weight(index_code):
             cached_data = self.base.cache_manager.get_index_weight(
                 index_code=index_code,
                 trade_date=trade_date,
@@ -61,7 +62,7 @@ class IndexFetcher:
             )
             if cached_data is not None and not cached_data.empty:
                 if self.base.progress_callback:
-                    self.base.progress_callback('cached', f"{index_code}: 使用缓存权重数据")
+                    self.base.progress_callback('cached', f"{index_code}: 最新交易日数据已存在，跳过下载")
                 return cached_data
         
         # 从API获取数据（支持分页）
@@ -82,13 +83,16 @@ class IndexFetcher:
                         api_params['start_date'] = start_date
                         api_params['end_date'] = end_date
                     elif start_date:
-                        end_date_str = datetime.now().strftime('%Y%m%d')
+                        # 使用 get_analysis_date() 获取正确的分析日期作为结束日期
+                        analysis_date = get_analysis_date()
+                        end_date_str = analysis_date.strftime('%Y%m%d')
                         api_params['start_date'] = start_date
                         api_params['end_date'] = end_date_str
                     else:
-                        # 获取最新的数据（最近1天）
-                        today = datetime.now().strftime('%Y%m%d')
-                        api_params['trade_date'] = today
+                        # 获取最新的数据：使用 get_analysis_date() 获取正确的交易日期
+                        analysis_date = get_analysis_date()
+                        trade_date_str = analysis_date.strftime('%Y%m%d')
+                        api_params['trade_date'] = trade_date_str
                     
                     # 添加limit和offset参数（支持分页）
                     api_params['limit'] = limit
@@ -101,18 +105,26 @@ class IndexFetcher:
                     if df_page is None or df_page.empty:
                         # 如果是第一页就返回空，可能是真的没有数据
                         if first_page:
-                            # 尝试获取昨天的数据（仅当使用trade_date时）
+                            # 尝试获取前一个交易日的数据（仅当使用trade_date时）
                             if not trade_date and not start_date:
-                                today = datetime.now().strftime('%Y%m%d')
-                                yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
-                                df_yesterday = self.base.pro.index_weight(
-                                    index_code=index_code,
-                                    trade_date=yesterday,
-                                    limit=limit,
-                                    offset=0
-                                )
-                                if df_yesterday is not None and not df_yesterday.empty:
-                                    all_data.append(df_yesterday)
+                                # 使用 get_analysis_date() 获取分析日期，然后往前推一个交易日
+                                analysis_date = get_analysis_date()
+                                # 往前推1-3天，找到前一个交易日
+                                for days_back in range(1, 4):
+                                    prev_date = analysis_date - timedelta(days=days_back)
+                                    # 简单判断：跳过周末
+                                    if prev_date.weekday() < 5:  # 周一到周五
+                                        prev_date_str = prev_date.strftime('%Y%m%d')
+                                        df_prev = self.base.pro.index_weight(
+                                            index_code=index_code,
+                                            trade_date=prev_date_str,
+                                            limit=limit,
+                                            offset=0
+                                        )
+                                        if df_prev is not None and not df_prev.empty:
+                                            all_data.append(df_prev)
+                                            break
+                                if all_data:  # 如果找到了数据，退出循环
                                     break
                         break
                     
@@ -189,7 +201,18 @@ class IndexFetcher:
                     if 'trade_date' in df.columns and not df.empty:
                         latest_date = df['trade_date'].max()
                         df = df[df['trade_date'] == latest_date].copy()
-                        print(f"[提示] {index_code} 未指定日期范围，已筛选为最新日期 {latest_date} 的数据")
+                        
+                        # 验证返回的日期是否合理
+                        analysis_date = get_analysis_date()
+                        analysis_date_str = analysis_date.strftime('%Y%m%d')
+                        if latest_date < analysis_date_str:
+                            days_diff = (datetime.strptime(analysis_date_str, '%Y%m%d') - 
+                                       datetime.strptime(latest_date, '%Y%m%d')).days
+                            if days_diff > 5:  # 如果超过5天，发出警告
+                                print(f"[警告] {index_code} API返回的交易日期 {latest_date} 比预期日期 {analysis_date_str} 早 {days_diff} 天")
+                                print(f"      这可能是正常的（指数权重数据可能有更新延迟），但请确认数据是否满足需求")
+                        else:
+                            print(f"[提示] {index_code} 未指定日期范围，已筛选为最新日期 {latest_date} 的数据")
                 # 如果指定了start_date和end_date，保留整个日期范围的数据，不做筛选
                 
                 # 去重：确保同一日期、同一股票只有一条记录

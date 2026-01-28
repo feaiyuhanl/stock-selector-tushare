@@ -155,6 +155,16 @@ class CacheManager(CacheBase):
             index_code, trade_date, start_date, end_date, force_refresh
         )
     
+    def has_latest_trading_day_data_index_weight(self, index_code: str) -> bool:
+        """
+        检查指数权重数据是否有最新交易日的数据（用于智能跳过下载）
+        Args:
+            index_code: 指数代码，如 '000300.SH'
+        Returns:
+            是否有最新交易日数据
+        """
+        return self.index_cache.has_latest_trading_day_data(index_code)
+    
     def save_index_weight(
         self,
         index_code: str,

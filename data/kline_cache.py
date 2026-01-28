@@ -69,9 +69,9 @@ class KlineCache:
             with sqlite3.connect(self.base.db_path) as conn:
                 cursor = conn.cursor()
 
-                # 查询最新的数据日期（移除update_time限制，只检查数据日期）
+                # 查询最新的数据日期和更新时间（需要检查更新时间以判断是否在收盘后保存）
                 cursor.execute('''
-                    SELECT MAX(date) FROM kline_data
+                    SELECT MAX(date), MAX(update_time) FROM kline_data
                     WHERE symbol = ? AND cache_type = ? AND period = ?
                 ''', (symbol, cache_type, period))
 
@@ -80,10 +80,23 @@ class KlineCache:
                     return False
 
                 latest_date_str = result[0]
+                latest_update_time_str = result[1]  # 最新的更新时间
                 latest_date = datetime.strptime(latest_date_str, '%Y-%m-%d').date()
                 today = datetime.now().date()
                 current_time = datetime.now().time()
                 weekday = datetime.now().weekday()
+                
+                # 解析更新时间（如果存在）
+                latest_update_time = None
+                if latest_update_time_str:
+                    try:
+                        latest_update_time = datetime.strptime(latest_update_time_str, '%Y-%m-%d %H:%M:%S')
+                    except:
+                        # 如果解析失败，尝试其他格式
+                        try:
+                            latest_update_time = datetime.strptime(latest_update_time_str, '%Y-%m-%d')
+                        except:
+                            pass
 
                 # 判断是否应该使用昨天的数据
                 # 如果当前在交易时间内，使用昨天的数据（今天数据不完整）
@@ -118,8 +131,25 @@ class KlineCache:
                     # 如果缓存中只有昨天的数据，需要刷新获取今天的数据
                     days_diff = (today - latest_date).days
                     
-                    # 如果缓存中的最新日期就是今天，认为有最新数据
+                    # 如果缓存中的最新日期就是今天，需要检查缓存是否在收盘后保存
                     if days_diff == 0:
+                        # 如果缓存更新时间存在，检查是否在收盘后保存
+                        if latest_update_time is not None:
+                            update_time_only = latest_update_time.time()
+                            # 如果缓存在收盘前（15:00之前）保存，需要刷新获取收盘后的最新价格
+                            if update_time_only < AFTERNOON_END:
+                                # 缓存在收盘前保存，需要刷新
+                                return False
+                        # 如果缓存更新时间不存在，保守策略：返回 False 触发刷新
+                        # 这样可以确保在交易日收盘后能及时获取最新数据
+                        elif weekday < 5:  # 工作日
+                            # 检查今天是否是交易日
+                            today_str = today.strftime('%Y%m%d')
+                            is_trading = self.base.is_trading_day(today_str)
+                            if is_trading is True:
+                                # 今天是交易日，但无法确定缓存是否在收盘后保存，返回 False 触发刷新
+                                return False
+                        # 如果无法确定，返回 True（使用缓存，避免不必要的刷新）
                         return True
                     
                     # 如果缓存中的最新日期是昨天（days_diff == 1），需要判断今天是否是交易日

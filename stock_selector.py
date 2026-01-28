@@ -4,13 +4,14 @@ A股选股程序主程序 - 支持多策略和缓存管理
 # 修复Windows中文编码问题
 import fix_encoding
 
+import os
+import sys
 import pandas as pd
 from datetime import datetime
 from typing import List, Optional
 from strategies import ScoringStrategy
 from strategies.base_strategy import BaseStrategy
 import config
-import sys
 
 # 导入工具函数
 from utils.token_checker import check_tushare_token
@@ -88,16 +89,17 @@ class StockSelector:
         self.strategy.data_fetcher.cache_manager.clear_cache(cache_type)
 
 
-def _send_combined_notification(args, results_fundamental: pd.DataFrame, results_index_weight: pd.DataFrame,
-                                selector_fundamental: StockSelector, selector_index_weight: StockSelector):
+def _send_notification(args, results: pd.DataFrame, selector: StockSelector,
+                      results_combined: pd.DataFrame = None,
+                      selector_combined: StockSelector = None):
     """
-    发送合并策略通知（同时包含两个策略的结果）
+    统一的通知发送函数，支持单策略和合并策略两种模式
     Args:
         args: 命令行参数对象
-        results_fundamental: 多因子打分策略结果DataFrame
-        results_index_weight: 指数权重策略结果DataFrame
-        selector_fundamental: 多因子策略的StockSelector实例
-        selector_index_weight: 指数权重策略的StockSelector实例
+        results: 选股结果DataFrame（单策略模式）或第一个策略结果（合并模式）
+        selector: StockSelector实例（单策略模式）或第一个策略的selector（合并模式）
+        results_combined: 第二个策略结果DataFrame（合并模式，可选）
+        selector_combined: 第二个策略的StockSelector实例（合并模式，可选）
     """
     try:
         from notifications import get_notifier
@@ -118,82 +120,7 @@ def _send_combined_notification(args, results_fundamental: pd.DataFrame, results
         else:
             recipients = config.EMAIL_CONFIG['default_recipients']
         
-        # 防骚扰检查（使用fundamental策略的selector）
-        filtered_recipients, throttle_manager = check_notification_throttle(args, selector_fundamental, recipients)
-        if filtered_recipients is None:
-            return  # 防骚扰检查未通过
-        
-        recipients = filtered_recipients
-        if not args.notify_throttle:
-            print(f"[邮件通知] 使用收件人: {recipients}")
-        
-        # 构建通知内容
-        subject = f"综合选股策略报告 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        # 准备股票数据（合并两个策略的结果）
-        stock_data_fundamental, total_stocks_fundamental = prepare_stock_data_for_notification(results_fundamental)
-        stock_data_index_weight, total_stocks_index_weight = prepare_stock_data_for_notification(results_index_weight)
-        
-        # 计算总股票数（取两个策略中较大的值）
-        total_stocks_count = max(total_stocks_fundamental, total_stocks_index_weight)
-        
-        # 调试信息
-        if total_stocks_count > 0:
-            print(f"[邮件通知] 多因子策略分析股票数: {total_stocks_fundamental} 只，返回TOP股票: {len(results_fundamental)} 只")
-            print(f"[邮件通知] 指数权重策略分析股票数: {total_stocks_index_weight} 只，返回TOP股票: {len(results_index_weight)} 只")
-        
-        # 发送通知（使用合并策略的模板）
-        success = notifier.send_combined_notification(
-            subject=subject,
-            recipients=recipients,
-            stock_data_fundamental=stock_data_fundamental,
-            stock_data_index_weight=stock_data_index_weight,
-            total_stocks=total_stocks_count
-        )
-        
-        if success:
-            print(f"\n[邮件通知] 已发送合并策略报告到: {', '.join(recipients)}")
-            
-            # 如果启用了防骚扰模式，标记已发送的邮箱地址
-            if args.notify_throttle and throttle_manager:
-                for email in recipients:
-                    throttle_manager.mark_as_sent(email)
-        else:
-            print(f"\n[邮件通知] 发送失败，请检查邮件配置")
-    
-    except Exception as e:
-        print(f"\n[邮件通知] 发送出错: {e}")
-        print(f"[提示] 请检查邮件配置或网络连接")
-
-
-def _send_notification(args, results: pd.DataFrame, selector: StockSelector):
-    """
-    发送通知
-    Args:
-        args: 命令行参数对象
-        results: 选股结果DataFrame
-        selector: StockSelector实例
-    """
-    try:
-        from notifications import get_notifier
-    except ImportError:
-        print(f"\n[邮件通知] 通知模块未安装，无法发送通知")
-        return
-    
-    try:
-        # 目前只支持邮件通知
-        notifier = get_notifier('email')
-        if not notifier or not notifier.is_available():
-            print(f"\n[邮件通知] 服务不可用，请检查配置")
-            return
-        
-        # 收件人优先从命令行参数获取，如果没有指定则从配置文件读取
-        if args.notify_to:
-            recipients = args.notify_to
-        else:
-            recipients = config.EMAIL_CONFIG['default_recipients']
-        
-        # 防骚扰检查
+        # 防骚扰检查（使用第一个selector）
         filtered_recipients, throttle_manager = check_notification_throttle(args, selector, recipients)
         if filtered_recipients is None:
             return  # 防骚扰检查未通过
@@ -202,111 +129,125 @@ def _send_notification(args, results: pd.DataFrame, selector: StockSelector):
         if not args.notify_throttle:
             print(f"[邮件通知] 使用收件人: {recipients}")
         
-        # 构建通知内容
-        subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        body = build_notification_body(args, results, selector)
+        # 判断是否为合并策略模式
+        is_combined = results_combined is not None and selector_combined is not None
         
-        # 准备股票数据
-        stock_data, total_stocks_count = prepare_stock_data_for_notification(results)
-        
-        # 调试信息：显示实际分析的总股票数和返回的股票数
-        if total_stocks_count > 0:
-            print(f"[邮件通知] 实际分析股票总数: {total_stocks_count} 只，返回TOP股票: {len(results)} 只")
-        
-        # 发送通知
-        success = notifier.send_notification(subject, body, recipients, 
-                                            stock_data=stock_data, 
-                                            total_stocks=total_stocks_count)
-        if success:
-            print(f"\n[邮件通知] 已发送通知到: {', '.join(recipients)}")
+        if is_combined:
+            # 合并策略模式
+            subject = f"综合选股策略报告 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             
-            # 如果启用了防骚扰模式，标记已发送的邮箱地址
-            if args.notify_throttle and throttle_manager:
-                for email in recipients:
-                    throttle_manager.mark_as_sent(email)
+            # 准备股票数据（合并两个策略的结果）
+            stock_data_fundamental, total_stocks_fundamental = prepare_stock_data_for_notification(results)
+            stock_data_index_weight, total_stocks_index_weight = prepare_stock_data_for_notification(results_combined)
+            
+            # 计算总股票数（取两个策略中较大的值）
+            total_stocks_count = max(total_stocks_fundamental, total_stocks_index_weight)
+            
+            # 调试信息
+            if total_stocks_count > 0:
+                print(f"[邮件通知] 多因子策略分析股票数: {total_stocks_fundamental} 只，返回TOP股票: {len(results)} 只")
+                print(f"[邮件通知] 指数权重策略分析股票数: {total_stocks_index_weight} 只，返回TOP股票: {len(results_combined)} 只")
+            
+            # 发送通知（使用合并策略的模板）
+            success = notifier.send_combined_notification(
+                subject=subject,
+                recipients=recipients,
+                stock_data_fundamental=stock_data_fundamental,
+                stock_data_index_weight=stock_data_index_weight,
+                total_stocks=total_stocks_count
+            )
+            
+            if success:
+                print(f"\n[邮件通知] 已发送合并策略报告到: {', '.join(recipients)}")
+            else:
+                print(f"\n[邮件通知] 发送失败，请检查邮件配置")
         else:
-            print(f"\n[邮件通知] 发送失败，请检查邮件配置")
+            # 单策略模式
+            subject = f"A股选股程序执行结果 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            body = build_notification_body(args, results, selector)
+            
+            # 准备股票数据
+            stock_data, total_stocks_count = prepare_stock_data_for_notification(results)
+            
+            # 调试信息：显示实际分析的总股票数和返回的股票数
+            if total_stocks_count > 0:
+                print(f"[邮件通知] 实际分析股票总数: {total_stocks_count} 只，返回TOP股票: {len(results)} 只")
+            
+            # 发送通知
+            success = notifier.send_notification(subject, body, recipients, 
+                                                stock_data=stock_data, 
+                                                total_stocks=total_stocks_count)
+            if success:
+                print(f"\n[邮件通知] 已发送通知到: {', '.join(recipients)}")
+            else:
+                print(f"\n[邮件通知] 发送失败，请检查邮件配置")
+        
+        # 如果启用了防骚扰模式，标记已发送的邮箱地址
+        if success and args.notify_throttle and throttle_manager:
+            for email in recipients:
+                throttle_manager.mark_as_sent(email)
     
     except Exception as e:
         print(f"\n[邮件通知] 发送出错: {e}")
         print(f"[提示] 请检查邮件配置或网络连接")
 
 
-def _handle_interrupt(selector: StockSelector):
+def _send_combined_notification(args, results_fundamental: pd.DataFrame, results_index_weight: pd.DataFrame,
+                                selector_fundamental: StockSelector, selector_index_weight: StockSelector):
+    """
+    发送合并策略通知（兼容性包装函数）
+    Args:
+        args: 命令行参数对象
+        results_fundamental: 多因子打分策略结果DataFrame
+        results_index_weight: 指数权重策略结果DataFrame
+        selector_fundamental: 多因子策略的StockSelector实例
+        selector_index_weight: 指数权重策略的StockSelector实例
+    """
+    _send_notification(args, results_fundamental, selector_fundamental,
+                      results_combined=results_index_weight,
+                      selector_combined=selector_index_weight)
+
+
+def _handle_interrupt(selector: Optional[StockSelector]):
     """处理用户中断（Ctrl+C）"""
     print("\n" + "=" * 60)
     print("程序被用户中断（Ctrl+C）")
     print("=" * 60)
-    try:
-        saved_count = selector.strategy.data_fetcher.flush_batch_cache()
-        if saved_count > 0:
-            print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
-        print("[提示] 已保存的数据将在下次运行时继续使用，无需重新下载")
-    except Exception as cache_error:
-        print(f"[警告] 保存缓存失败: {cache_error}")
+    if selector is not None:
+        try:
+            saved_count = selector.strategy.data_fetcher.flush_batch_cache()
+            if saved_count > 0:
+                print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
+            print("[提示] 已保存的数据将在下次运行时继续使用，无需重新下载")
+        except Exception as cache_error:
+            print(f"[警告] 保存缓存失败: {cache_error}")
     print("=" * 60)
 
 
-def _handle_execution_error(selector: StockSelector, error: Exception):
+def _get_current_selector(local_vars: dict) -> Optional[StockSelector]:
+    """
+    从局部变量中获取当前的selector
+    Args:
+        local_vars: 局部变量字典（通常使用 locals()）
+    Returns:
+        找到的selector，如果不存在则返回None
+    """
+    return (local_vars.get('selector') or 
+            local_vars.get('selector_fundamental') or
+            local_vars.get('selector_index_weight'))
+
+
+def _handle_execution_error(selector: Optional[StockSelector], error: Exception):
     """处理执行错误"""
     print(f"\n程序执行出错: {error}")
-    try:
-        saved_count = selector.strategy.data_fetcher.flush_batch_cache()
-        if saved_count > 0:
-            print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
-    except Exception as cache_error:
-        print(f"[警告] 保存缓存失败: {cache_error}")
+    if selector is not None:
+        try:
+            saved_count = selector.strategy.data_fetcher.flush_batch_cache()
+            if saved_count > 0:
+                print(f"[缓存更新] 已保存 {saved_count} 只股票的缓存数据")
+        except Exception as cache_error:
+            print(f"[警告] 保存缓存失败: {cache_error}")
     raise
-
-
-def _handle_review_command(args):
-    """处理复盘命令"""
-    from data.fetcher import DataFetcher
-    from autoreview import ReviewHelper
-    
-    # 创建数据获取器
-    data_fetcher = DataFetcher(test_sources=False)
-    
-    # 创建复盘助手
-    review_helper = ReviewHelper(data_fetcher, data_fetcher.cache_manager)
-    
-    # 执行复盘
-    review_data = review_helper.review_single_date(
-        trade_date=args.review_date,
-        days=args.review_days,
-        strategy_name=getattr(args, 'strategy', None)
-    )
-    
-    if review_data is not None and not review_data.empty:
-        # 生成并打印报告
-        report = review_helper.generate_review_report(
-            review_data, args.review_date, args.review_days
-        )
-        print("\n" + report)
-    else:
-        print(f"未找到日期 {args.review_date} 的复盘数据")
-
-
-def _handle_fill_review_gaps():
-    """处理补齐复盘数据命令"""
-    from data.fetcher import DataFetcher
-    from autoreview import AutoReview
-    import config
-    
-    print("\n" + "=" * 60)
-    print("【补齐缺失复盘数据】")
-    print("=" * 60)
-    
-    # 创建数据获取器
-    data_fetcher = DataFetcher(test_sources=False)
-    
-    # 创建自动复盘管理器
-    auto_review = AutoReview(data_fetcher, data_fetcher.cache_manager)
-    
-    # 补齐缺失数据
-    auto_review.fill_missing_reviews(
-        days=config.AUTO_REVIEW_CONFIG.get('review_days', 10)
-    )
 
 
 def _create_strategy(args) -> BaseStrategy:
@@ -411,14 +352,7 @@ def _save_recommendations(selector: StockSelector, strategy: BaseStrategy, resul
         trade_date = analysis_date.strftime('%Y%m%d')
         
         strategy_name = strategy.get_strategy_name()
-        
-        # 确定策略类型
-        if strategy_name == 'ScoringStrategy':
-            strategy_type = 'fundamental'
-        elif strategy_name == 'IndexWeightStrategy':
-            strategy_type = 'index_weight'
-        else:
-            strategy_type = 'unknown'
+        strategy_type = strategy.strategy_type
         
         # 保存推荐结果
         selector.strategy.data_fetcher.cache_manager.save_recommendations(
@@ -434,9 +368,131 @@ def _save_recommendations(selector: StockSelector, strategy: BaseStrategy, resul
         print(f"[警告] 保存推荐结果失败: {e}")
 
 
+# 导入配置验证器
+from core.validator import ConfigValidator
+
+def _check_feishu_config(cfg: dict):
+    """检查飞书配置，返回 (missing, folder, app_id, app_secret)。missing 为 [(配置项, 配置说明), ...]。"""
+    return ConfigValidator.validate_feishu_config(cfg)
+
+
+def _handle_sync_feishu_only():
+    """--sync-feishu-only：将本地复盘结果同步到飞书；若本地无复盘数据则自动执行 combined 选股与复盘后再同步。"""
+    import argparse
+    cfg = getattr(config, "FEISHU_SHEETS_CONFIG", None) or {}
+    missing, _, _, _ = ConfigValidator.validate_feishu_config(cfg)
+    if missing:
+        print("错误: --sync-feishu-only 需要配置以下项：", flush=True)
+        for name, hint in missing:
+            print(f"  - {name}：{hint}", flush=True)
+        sys.exit(1)
+    from data.cache_manager import CacheManager
+    from autoreview import ReviewCache
+    cm = CacheManager()
+    print(f"[飞书同步] 使用的 DB: {cm.db_path}")
+    rc = ReviewCache(cm)
+    df_s = rc.get_review_summary(strategy_name='ScoringStrategy')
+    df_i = rc.get_review_summary(strategy_name='IndexWeightStrategy')
+    needs_combined = (df_s is None or df_s.empty) and (df_i is None or df_i.empty)
+    if needs_combined:
+        print("[飞书同步] 本地无复盘数据，正在自动执行 combined 选股与复盘…")
+        if not check_tushare_token():
+            sys.exit(1)
+        args = argparse.Namespace(
+            refresh=False,
+            strategy='multi_factor',
+            factor_set='combined',
+            top_n=config.TOP_N,
+            stocks=None,
+            board=None,
+            workers=config.DEFAULT_MAX_WORKERS,
+            indices=None,
+            lookback_days=None,
+        )
+        args_fundamental = argparse.Namespace(**vars(args))
+        args_fundamental.factor_set = 'fundamental'
+        args_index_weight = argparse.Namespace(**vars(args))
+        args_index_weight.factor_set = 'index_weight'
+        
+        # 使用策略执行器执行合并策略
+        from core.executor import StrategyExecutor
+        executor = StrategyExecutor(
+            create_strategy_func=_create_strategy,
+            prepare_params_func=_prepare_select_params,
+            print_startup_info_func=_print_startup_info,
+            execute_selection_func=_execute_selection,
+            save_recommendations_func=_save_recommendations
+        )
+        
+        print("\n" + "=" * 60)
+        print("【综合策略模式】同时运行两个策略")
+        print("=" * 60)
+        results_fundamental, selector_fundamental, results_index_weight, selector_index_weight = executor.execute_combined(
+            args_fundamental, args_index_weight
+        )
+        if config.AUTO_REVIEW_CONFIG.get('enabled', True):
+            try:
+                from autoreview import AutoReview
+                AutoReview(
+                    selector_fundamental.strategy.data_fetcher,
+                    selector_fundamental.strategy.data_fetcher.cache_manager,
+                ).auto_review_last_n_days()
+            except Exception as e:
+                print(f"[警告] 自动复盘失败: {e}")
+        cache_manager = selector_fundamental.strategy.data_fetcher.cache_manager
+        _run_feishu_sync(cache_manager, ['ScoringStrategy', 'IndexWeightStrategy'], force=True)
+        print("[飞书同步] 完成")
+        return
+    print("[飞书同步] 开始将本地复盘结果同步到飞书...")
+    _run_feishu_sync(cm, ['ScoringStrategy', 'IndexWeightStrategy'], force=True)
+    print("[飞书同步] 完成")
+
+
+def _run_feishu_sync(cache_manager, strategy_names: list, force: bool = False):
+    """复盘流程结束后，若开启飞书同步则按策略同步到飞书电子表格；force=True 时跳过 enabled 检查。"""
+    cfg = getattr(config, "FEISHU_SHEETS_CONFIG", None) or {}
+    if not force and not cfg.get("enabled"):
+        print("[飞书同步] 已跳过（FEISHU_SHEETS_CONFIG.enabled=False）。若需同步请在 config 中设置 enabled=True 并配置 folder_token、app_id、app_secret。")
+        return
+    missing, folder, _app_id, _app_secret = ConfigValidator.validate_feishu_config(cfg)
+    if missing:
+        print("[飞书同步] 已跳过，以下配置未填写：")
+        for name, hint in missing:
+            print(f"  - {name}：{hint}")
+        return
+    from autoreview import ReviewCache
+    from exports.feishu_sheets import sync_review_to_feishu
+    review_cache = ReviewCache(cache_manager)
+    any_with_data = False
+    for sn in strategy_names:
+        df = review_cache.get_review_summary(strategy_name=sn)
+        if df is not None and not df.empty:
+            any_with_data = True
+            ok = sync_review_to_feishu(sn, df, folder, cfg)
+            if ok:
+                print(f"[飞书同步] {sn} 已同步 {len(df)} 条复盘结果")
+            else:
+                print(f"[飞书同步] {sn} 同步失败，请检查配置与网络")
+        elif force:
+            print(f"[飞书同步] {sn} 无复盘数据，跳过")
+    if force and not any_with_data:
+        print("[飞书同步] 同步完成，各策略均无复盘数据。")
+        print("[飞书同步] 多为过去 N 日未运行选股导致，详见 docs/review.md；连续多日运行选股后重试。")
+        print(f"[飞书同步] 使用的 DB: {cache_manager.db_path}")
+        import sqlite3
+        try:
+            with sqlite3.connect(cache_manager.db_path) as conn:
+                rows = conn.execute("SELECT DISTINCT strategy_name FROM review_summary").fetchall()
+            if rows:
+                names = ", ".join(str(r[0]) for r in rows)
+                print(f"[飞书同步] 诊断: review_summary 中的 strategy_name 有: {names}")
+        except Exception:
+            pass
+
+
 def _execute_selection(selector: StockSelector, strategy: BaseStrategy, params: dict) -> pd.DataFrame:
     """
-    执行选股
+    执行选股 - 统一调用策略接口
     Args:
         selector: 选股器实例
         strategy: 策略实例
@@ -444,12 +500,8 @@ def _execute_selection(selector: StockSelector, strategy: BaseStrategy, params: 
     Returns:
         选股结果DataFrame
     """
-    # 指数权重因子组合直接使用策略的select_top_stocks方法（支持额外参数）
-    if strategy.get_strategy_name() == 'IndexWeightStrategy':
-        return strategy.select_top_stocks(**params)
-    else:
-        # 其他因子组合使用选股器的select_top_stocks方法
-        return selector.select_top_stocks(**params)
+    # 统一调用策略的 select_top_stocks 接口
+    return strategy.select_top_stocks(**params)
 
 
 def main():
@@ -487,17 +539,9 @@ def main():
     parser.add_argument('--notify-throttle', action='store_true', 
                        help='启用通知防骚扰：仅在交易日15:00之后发送，且每个邮箱每天最多发送一次')
     
-    # 复盘功能参数
-    parser.add_argument('--review', action='store_true',
-                       help='启用复盘模式：查看指定日期的推荐结果复盘')
-    parser.add_argument('--review-date', type=str,
-                       help='复盘日期，格式：YYYYMMDD（与--review一起使用）')
-    parser.add_argument('--review-days', type=int, default=10,
-                       help='复盘天数（交易日数，默认10天）')
-    parser.add_argument('--fill-review-gaps', action='store_true',
-                       help='补齐缺失的复盘数据（不执行选股）')
-    parser.add_argument('--no-auto-review', action='store_true',
-                       help='禁用自动复盘（即使配置中启用了自动复盘）')
+    # 复盘功能参数（复盘为自动：选股后自动复盘最近 10 个交易日、自动查缺补漏，由 config 控制）
+    parser.add_argument('--sync-feishu-only', action='store_true',
+                       help='将本地复盘结果同步到飞书；若本地无复盘数据则自动执行 combined 选股与复盘后再同步')
     
     args = parser.parse_args()
 
@@ -506,17 +550,9 @@ def main():
         print_cache_info(args.cache_info)
         return
     
-    # 处理复盘命令
-    if args.review:
-        if not args.review_date:
-            print("错误: 使用 --review 时必须指定 --review-date")
-            sys.exit(1)
-        _handle_review_command(args)
-        return
-    
-    # 处理补齐复盘数据命令
-    if args.fill_review_gaps:
-        _handle_fill_review_gaps()
+    # 仅同步飞书（临时测试：不执行选股与复盘）
+    if args.sync_feishu_only:
+        _handle_sync_feishu_only()
         return
 
     # 前置检查：验证Tushare Token配置
@@ -524,116 +560,34 @@ def main():
         sys.exit(1)
     
     # 创建并执行选股流程
+    from core.executor import StrategyExecutor
+    from core.pipeline import SelectionPipeline
+    
+    executor = StrategyExecutor(
+        create_strategy_func=_create_strategy,
+        prepare_params_func=_prepare_select_params,
+        print_startup_info_func=_print_startup_info,
+        execute_selection_func=_execute_selection,
+        save_recommendations_func=_save_recommendations
+    )
+    
+    pipeline = SelectionPipeline(executor)
+    
     try:
-        # 如果使用combined模式，同时运行两个策略
+        # 如果使用combined模式，显示提示信息
         if args.factor_set == 'combined':
-            # 运行两个策略
             print("\n" + "=" * 60)
             print("【综合策略模式】同时运行两个策略")
             print("=" * 60)
-            
-            # 创建两个策略的参数副本
-            args_fundamental = argparse.Namespace(**vars(args))
-            args_fundamental.factor_set = 'fundamental'
-            args_index_weight = argparse.Namespace(**vars(args))
-            args_index_weight.factor_set = 'index_weight'
-            
-            # 运行基本面策略
-            print("\n" + "-" * 60)
-            print("【策略1】多因子打分策略（基本面+成交量+价格）")
-            print("-" * 60)
-            strategy_fundamental = _create_strategy(args_fundamental)
-            selector_fundamental = StockSelector(strategy=strategy_fundamental)
-            select_params_fundamental = _prepare_select_params(args_fundamental, strategy_fundamental)
-            _print_startup_info(args_fundamental, strategy_fundamental)
-            results_fundamental = _execute_selection(selector_fundamental, strategy_fundamental, select_params_fundamental)
-            
-            # 运行指数权重策略
-            print("\n" + "-" * 60)
-            print("【策略2】指数权重选股策略")
-            print("-" * 60)
-            strategy_index_weight = _create_strategy(args_index_weight)
-            selector_index_weight = StockSelector(strategy=strategy_index_weight)
-            select_params_index_weight = _prepare_select_params(args_index_weight, strategy_index_weight)
-            _print_startup_info(args_index_weight, strategy_index_weight)
-            results_index_weight = _execute_selection(selector_index_weight, strategy_index_weight, select_params_index_weight)
-            
-            # 输出结果
-            print("\n" + "=" * 60)
-            print("【策略1结果】多因子打分策略")
-            print("=" * 60)
-            print_results(results_fundamental, selector_fundamental)
-            
-            print("\n" + "=" * 60)
-            print("【策略2结果】指数权重选股策略")
-            print("=" * 60)
-            print_results(results_index_weight, selector_index_weight)
-            
-            # 保存推荐结果
-            _save_recommendations(selector_fundamental, strategy_fundamental, results_fundamental)
-            _save_recommendations(selector_index_weight, strategy_index_weight, results_index_weight)
-            
-            # 自动复盘（如果启用）
-            if not args.no_auto_review and config.AUTO_REVIEW_CONFIG.get('enabled', True):
-                try:
-                    from autoreview import AutoReview
-                    auto_review = AutoReview(
-                        selector_fundamental.strategy.data_fetcher,
-                        selector_fundamental.strategy.data_fetcher.cache_manager
-                    )
-                    auto_review.auto_review_last_n_days(
-                        days=config.AUTO_REVIEW_CONFIG.get('review_days', 10)
-                    )
-                except Exception as e:
-                    print(f"[警告] 自动复盘失败: {e}")
-            
-            # 发送通知（合并两个策略的结果）
-            if args.notify:
-                _send_combined_notification(args, results_fundamental, results_index_weight, 
-                                          selector_fundamental, selector_index_weight)
-        else:
-            # 单个策略模式（原有逻辑）
-            strategy = _create_strategy(args)
-            selector = StockSelector(strategy=strategy)
-            
-            # 准备选股参数
-            select_params = _prepare_select_params(args, strategy)
-            
-            # 打印状态信息
-            _print_startup_info(args, strategy)
-            
-            # 执行选股
-            results = _execute_selection(selector, strategy, select_params)
-            
-            # 输出结果
-            print_results(results, selector)
-            
-            # 保存推荐结果
-            _save_recommendations(selector, strategy, results)
-            
-            # 自动复盘（如果启用）
-            if not args.no_auto_review and config.AUTO_REVIEW_CONFIG.get('enabled', True):
-                try:
-                    from autoreview import AutoReview
-                    auto_review = AutoReview(
-                        selector.strategy.data_fetcher,
-                        selector.strategy.data_fetcher.cache_manager
-                    )
-                    auto_review.auto_review_last_n_days(
-                        days=config.AUTO_REVIEW_CONFIG.get('review_days', 10)
-                    )
-                except Exception as e:
-                    print(f"[警告] 自动复盘失败: {e}")
-            
-            # 发送通知
-            if args.notify:
-                _send_notification(args, results, selector)
+        
+        # 执行选股流程
+        pipeline.run(args, _run_feishu_sync, _send_notification)
             
     except KeyboardInterrupt:
-        _handle_interrupt(selector)
+        pipeline.handle_interrupt(_handle_interrupt)
         return
     except Exception as e:
-        _handle_execution_error(selector, e)
+        pipeline.handle_error(e, _handle_execution_error)
 
 
 if __name__ == '__main__':

@@ -96,6 +96,50 @@ class IndexCache:
         
         return None
     
+    def has_latest_trading_day_data(self, index_code: str) -> bool:
+        """
+        检查是否有最新交易日的数据（用于智能跳过下载，类似K线数据的处理方式）
+        Args:
+            index_code: 指数代码，如 '000300.SH'
+        Returns:
+            是否有最新交易日数据
+        """
+        try:
+            from data.utils import get_analysis_date
+            analysis_date = get_analysis_date()
+            analysis_date_str = analysis_date.strftime('%Y%m%d')
+            
+            with sqlite3.connect(self.base.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # 查询最新的数据日期
+                cursor.execute('''
+                    SELECT MAX(trade_date) FROM index_weight_data
+                    WHERE index_code = ?
+                ''', (index_code,))
+                
+                result = cursor.fetchone()
+                if not result or not result[0]:
+                    return False
+                
+                latest_date_str = result[0]
+                latest_date = datetime.strptime(latest_date_str, '%Y%m%d').date()
+                analysis_date_obj = analysis_date.date()
+                
+                # 计算日期差
+                days_diff = (analysis_date_obj - latest_date).days
+                
+                # 如果最新数据日期在最近7天内，认为有效（考虑假期）
+                if days_diff <= 7:
+                    return True
+                
+                # 超过7天，认为缓存过期
+                return False
+                
+        except Exception as e:
+            print(f"检查指数权重数据有效性失败 ({index_code}): {e}")
+            return False
+    
     def save_index_weight(
         self,
         index_code: str,
