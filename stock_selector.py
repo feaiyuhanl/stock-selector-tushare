@@ -9,8 +9,16 @@ import sys
 
 # 确保项目根目录在 Python 搜索路径中
 _project_root = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.normpath(_project_root)  # 标准化路径，处理不同操作系统的路径分隔符
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+
+# 验证 core 模块是否存在
+_core_path = os.path.join(_project_root, 'core')
+if not os.path.isdir(_core_path):
+    raise ImportError(f"无法找到 core 模块目录: {_core_path}\n"
+                     f"项目根目录: {_project_root}\n"
+                     f"Python 搜索路径: {sys.path[:3]}")
 
 import pandas as pd
 from datetime import datetime
@@ -35,6 +43,9 @@ from notifications.helpers import (
     prepare_stock_data_for_notification,
     build_notification_body,
 )
+
+# 导入配置验证器
+from core.validator import ConfigValidator
 
 
 class StockSelector:
@@ -373,9 +384,6 @@ def _save_recommendations(selector: StockSelector, strategy: BaseStrategy, resul
     except Exception as e:
         print(f"[警告] 保存推荐结果失败: {e}")
 
-
-# 导入配置验证器
-from core.validator import ConfigValidator
 
 def _check_feishu_config(cfg: dict):
     """检查飞书配置，返回 (missing, folder, app_id, app_secret)。missing 为 [(配置项, 配置说明), ...]。"""
