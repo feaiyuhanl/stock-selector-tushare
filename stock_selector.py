@@ -6,6 +6,12 @@ import fix_encoding
 
 import os
 import sys
+
+# 确保项目根目录在 Python 搜索路径中
+_project_root = os.path.dirname(os.path.abspath(__file__))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import pandas as pd
 from datetime import datetime
 from typing import List, Optional
