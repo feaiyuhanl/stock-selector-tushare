@@ -71,6 +71,9 @@ DEFAULT_BOARD_TYPES = ['main']  # 可以修改为 ['main', 'gem'] 等
 # 多线程配置
 DEFAULT_MAX_WORKERS = 3  # 默认线程数（内存受限环境建议 2-5，原值 10 可能导致 OOM）
 
+# 执行性能：选股前是否跳过数据新鲜度报告（True 可缩短首屏时间，但看不到缓存概况）
+SKIP_FRESHNESS_REPORT = False
+
 # Tushare配置
 TUSHARE_TOKEN = None  # 需要在环境变量或配置文件中设置，或通过代码设置
 

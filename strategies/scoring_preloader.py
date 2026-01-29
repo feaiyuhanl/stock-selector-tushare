@@ -344,37 +344,37 @@ class ScoringPreloader:
             
             if retry_stocks:
                 retry_count = len(retry_stocks)
-                print(f"\n【二次重试】对 {retry_count} 只缺失数据的股票进行重试...")
+                print(f"\n【二次重试】对 {retry_count} 只缺失数据的股票进行重试（并行 2 线程）...")
                 retry_success = 0
-                
-                for stock_code, need_fundamental, need_financial in retry_stocks:
+                retry_workers = min(2, retry_count)  # 控制并发，避免 Tushare 限频
+
+                def _retry_single(item):
+                    stock_code, need_fundamental, need_financial = item
+                    data = preloaded_data.get(stock_code)
+                    if data is None:
+                        return 0
+                    got_any = False
                     try:
-                        stock_name = stock_name_map.get(stock_code, "")
-                        data = preloaded_data.get(stock_code)
-                        if data is None:
-                            continue
-                        
-                        # 重试获取基本面数据
                         if need_fundamental:
                             retry_fundamental = self.data_fetcher.get_stock_fundamental(stock_code)
                             if retry_fundamental is not None:
                                 data['fundamental_data'] = retry_fundamental
-                                retry_success += 1
-                        
-                        # 重试获取财务数据
+                                got_any = True
                         if need_financial:
                             retry_financial = self.data_fetcher.get_stock_financial(stock_code)
                             if retry_financial is not None:
                                 data['financial_data'] = retry_financial
-                                if not need_fundamental:  # 避免重复计数
-                                    retry_success += 1
-                        
-                        # 短暂延迟，避免请求过快
-                        time.sleep(0.1)
-                    except Exception as e:
-                        # 静默失败，继续处理下一个
+                                got_any = True
+                        if got_any:
+                            time.sleep(0.05)  # 轻量间隔，配合限频
+                    except Exception:
                         pass
-                
+                    return 1 if got_any else 0
+
+                with ThreadPoolExecutor(max_workers=retry_workers) as retry_executor:
+                    for n in retry_executor.map(_retry_single, retry_stocks):
+                        retry_success += n
+
                 if retry_success > 0:
                     print(f"  ✓ 二次重试完成: 成功获取 {retry_success} 只股票的数据")
                     # 保存重试获取的缓存

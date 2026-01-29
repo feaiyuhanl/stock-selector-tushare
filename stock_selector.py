@@ -556,6 +556,8 @@ def main():
     # 复盘功能参数（复盘为自动：选股后自动复盘最近 10 个交易日、自动查缺补漏，由 config 控制）
     parser.add_argument('--sync-feishu-only', action='store_true',
                        help='将本地复盘结果同步到飞书；若本地无复盘数据则自动执行 combined 选股与复盘后再同步')
+    parser.add_argument('--skip-freshness-report', action='store_true',
+                       help='选股前跳过数据新鲜度检查报告，可缩短首屏时间（选股结果不变）')
     
     args = parser.parse_args()
 
@@ -572,6 +574,19 @@ def main():
     # 前置检查：验证Tushare Token配置
     if not check_tushare_token():
         sys.exit(1)
+    
+    # 选股前数据新鲜度检查（输出 K 线、指数权重、基本面缓存的交易日与覆盖率）；可跳过以缩短首屏时间
+    skip_freshness = getattr(args, 'skip_freshness_report', False) or getattr(config, 'SKIP_FRESHNESS_REPORT', False)
+    if not skip_freshness:
+        import argparse as _argparse
+        if args.factor_set == 'combined':
+            _args_report = _argparse.Namespace(**vars(args))
+            _args_report.factor_set = 'fundamental'
+            _strategy_report = _create_strategy(_args_report)
+        else:
+            _strategy_report = _create_strategy(args)
+        from utils.data_freshness_report import print_data_freshness_report
+        print_data_freshness_report(_strategy_report.data_fetcher, args)
     
     # 创建并执行选股流程
     from core.executor import StrategyExecutor
